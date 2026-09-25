@@ -1,0 +1,318 @@
+// データ操作（遠征・セッション・タイマー）。すべて store.commit 経由で原子的に保存する。
+import { commit, getDb, UserError } from './store.js';
+import { uid, todayYMD, ymdFromDate, currentTz } from './util.js';
+
+/* ---------------- 共通 ---------------- */
+
+function rememberPrefs(db, v) {
+  const p = db.prefs;
+  if (v.tripId !== undefined) p.lastTripId = v.tripId || null;
+  if (v.location) p.lastLocation = v.location;
+  if (v.currency) {
+    p.lastCurrency = v.currency;
+    if (v.bb) {
+      p.stakes = p.stakes || {};
+      p.stakes[v.currency] = { sb: v.sb, bb: v.bb };
+    }
+    if (v.initialBuyin != null) {
+      p.buyins = p.buyins || {};
+      p.buyins[v.currency] = v.initialBuyin;
+    }
+  }
+}
+
+/** 日付が含まれる遠征（複数あれば開始日が新しいもの） */
+export function tripForDate(db, date) {
+  const hits = db.trips
+    .filter((t) => t.startDate <= date && (!t.endDate || date <= t.endDate))
+    .sort((a, b) => (a.startDate < b.startDate ? 1 : -1));
+  return hits[0] || null;
+}
+
+export function defaultTripId(db, date = todayYMD()) {
+  const t = tripForDate(db, date);
+  if (t) return t.id;
+  const last = db.prefs.lastTripId;
+  if (last && db.trips.some((x) => x.id === last)) return last;
+  return '';
+}
+
+/** 最近使った場所（新しい順・重複なし） */
+export function recentLocations(db, limit = 6) {
+  const seen = new Map();
+  const list = [...db.sessions].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  if (db.active) list.unshift(db.active);
+  for (const s of list) {
+    const k = (s.location || '').trim();
+    if (k && !seen.has(k.toLowerCase())) seen.set(k.toLowerCase(), k);
+    if (seen.size >= limit) break;
+  }
+  return [...seen.values()];
+}
+
+/** 通貨ごとの最近使ったレート */
+export function recentStakes(db, currency, limit = 4) {
+  const seen = new Map();
+  const list = [...db.sessions].filter((s) => s.currency === currency).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  for (const s of list) {
+    const k = `${s.sb}/${s.bb}`;
+    if (!seen.has(k)) seen.set(k, { sb: s.sb, bb: s.bb });
+    if (seen.size >= limit) break;
+  }
+  return [...seen.values()];
+}
+
+/* ---------------- 遠征 ---------------- */
+
+export function createTrip(v) {
+  return commit((db) => {
+    const now = Date.now();
+    const trip = { id: uid(), ...v, createdAt: now, updatedAt: now };
+    db.trips.push(trip);
+    return trip;
+  });
+}
+
+export function updateTrip(id, v) {
+  return commit((db) => {
+    const t = db.trips.find((x) => x.id === id);
+    if (!t) throw new UserError('この遠征は見つかりません（削除された可能性があります）');
+    Object.assign(t, v, { updatedAt: Date.now() });
+    return t;
+  });
+}
+
+export function updateTripExpenses(id, expenses) {
+  return updateTrip(id, { expenses });
+}
+
+/** mode: 'detach'（記録は「遠征なし」に移して残す）/ 'cascade'（記録も削除） */
+export function deleteTrip(id, mode) {
+  return commit((db) => {
+    const idx = db.trips.findIndex((x) => x.id === id);
+    if (idx < 0) throw new UserError('この遠征は見つかりません');
+    const [trip] = db.trips.splice(idx, 1);
+    const related = db.sessions.filter((s) => s.tripId === id);
+    if (mode === 'cascade') {
+      db.sessions = db.sessions.filter((s) => s.tripId !== id);
+    } else {
+      for (const s of related) { s.tripId = null; s.updatedAt = Date.now(); }
+    }
+    if (db.active && db.active.tripId === id) db.active.tripId = null;
+    if (db.prefs.lastTripId === id) db.prefs.lastTripId = null;
+    return { trip, count: related.length };
+  });
+}
+
+/* ---------------- セッション ---------------- */
+
+export function createSession(v, extra = {}) {
+  return commit((db) => {
+    const now = Date.now();
+    const s = { id: uid(), ...v, rate: null, ...extra, createdAt: now, updatedAt: now };
+    db.sessions.push(s);
+    rememberPrefs(db, v);
+    return s;
+  });
+}
+
+export function updateSession(id, v) {
+  return commit((db) => {
+    const s = db.sessions.find((x) => x.id === id);
+    if (!s) throw new UserError('このセッションは見つかりません（削除された可能性があります）');
+    const rateReset = s.date !== v.date || s.currency !== v.currency;
+    Object.assign(s, v, { updatedAt: Date.now() });
+    if (rateReset) s.rate = null; // プレイ日・通貨が変わったら、そのプレイ日のレートを取り直す
+    return { session: s, rateReset };
+  });
+}
+
+export function deleteSession(id) {
+  return commit((db) => {
+    const idx = db.sessions.findIndex((x) => x.id === id);
+    if (idx < 0) throw new UserError('このセッションは見つかりません');
+    return db.sessions.splice(idx, 1)[0];
+  });
+}
+
+export function restoreSession(s) {
+  return commit((db) => {
+    if (!db.sessions.some((x) => x.id === s.id)) {
+      if (s.tripId && !db.trips.some((t) => t.id === s.tripId)) s.tripId = null;
+      db.sessions.push(s);
+    }
+  });
+}
+
+export function setManualRate(id, value) {
+  return commit((db) => {
+    const s = db.sessions.find((x) => x.id === id);
+    if (!s) throw new UserError('このセッションは見つかりません');
+    s.rate = { value, date: s.date, source: '手入力', manual: true, setAt: new Date().toISOString() };
+    s.updatedAt = Date.now();
+  });
+}
+
+/** 手入力を解除して自動取得に戻す */
+export function clearRate(id) {
+  return commit((db) => {
+    const s = db.sessions.find((x) => x.id === id);
+    if (!s) throw new UserError('このセッションは見つかりません');
+    s.rate = null;
+    s.updatedAt = Date.now();
+  });
+}
+
+/* ---------------- タイマー（進行中のセッションは常に1件） ---------------- */
+
+export function liveElapsedMs(a, now = Date.now()) {
+  if (!a) return 0;
+  return a.segments.reduce((sum, seg) => sum + ((seg.e ?? now) - seg.s), 0);
+}
+export function liveBreakMs(a, now = Date.now()) {
+  if (!a || !a.segments.length) return 0;
+  let total = 0;
+  for (let i = 1; i < a.segments.length; i++) total += a.segments[i].s - a.segments[i - 1].e;
+  const last = a.segments[a.segments.length - 1];
+  if (a.status === 'break' && last.e) total += now - last.e;
+  return total;
+}
+export function liveBuyinTotal(a) {
+  return Math.round(a.buyins.reduce((s, b) => s + b.amount, 0) * 100) / 100;
+}
+
+export function startLive(v) {
+  return commit((db) => {
+    if (db.active) throw new UserError('すでに進行中のセッションがあります');
+    const now = Date.now();
+    db.active = {
+      id: uid(),
+      tripId: v.tripId || null,
+      location: v.location,
+      currency: v.currency,
+      sb: v.sb,
+      bb: v.bb,
+      date: ymdFromDate(new Date(now)), // 開始した現地の日付
+      tz: currentTz(),
+      startedAt: now,
+      segments: [{ s: now, e: null }],
+      status: 'playing',
+      buyins: v.buyin > 0 ? [{ amount: v.buyin, at: now }] : [],
+      draft: null,
+    };
+    rememberPrefs(db, { ...v, initialBuyin: v.buyin });
+    return db.active;
+  });
+}
+
+function withActive(fn) {
+  return commit((db) => {
+    if (!db.active) throw new UserError('進行中のセッションはありません');
+    return fn(db.active, db);
+  });
+}
+
+export function pauseLive() {
+  return withActive((a) => {
+    if (a.status !== 'playing') return a;
+    a.segments[a.segments.length - 1].e = Date.now();
+    a.status = 'break';
+    return a;
+  });
+}
+
+export function resumeLive() {
+  return withActive((a) => {
+    if (a.status === 'playing') return a;
+    a.segments.push({ s: Date.now(), e: null });
+    a.status = 'playing';
+    return a;
+  });
+}
+
+export function addBuyin(amount) {
+  return withActive((a) => {
+    a.buyins.push({ amount, at: Date.now() });
+    return a;
+  });
+}
+export function removeLastBuyin() {
+  return withActive((a) => {
+    a.buyins.pop();
+    return a;
+  });
+}
+export function updateLiveInfo(v) {
+  return withActive((a) => {
+    Object.assign(a, v);
+    return a;
+  });
+}
+
+/** 終了して精算画面へ（タイマー停止） */
+export function settleLive() {
+  return withActive((a) => {
+    const now = Date.now();
+    const last = a.segments[a.segments.length - 1];
+    if (a.status === 'playing' && last && last.e == null) last.e = now;
+    if (a.status !== 'settling') {
+      a.status = 'settling';
+      a.endedAt = now;
+    }
+    return a;
+  });
+}
+
+/** 精算をやめてプレイに戻る（タイマー再開） */
+export function backToPlay() {
+  return withActive((a) => {
+    a.segments.push({ s: Date.now(), e: null });
+    a.status = 'playing';
+    a.endedAt = null;
+    return a;
+  });
+}
+
+export function saveLiveDraft(draft) {
+  return commit((db) => {
+    if (db.active) db.active.draft = draft;
+  }, { silent: true });
+}
+
+/** 精算して保存。同じ進行中セッションから二重に保存されない（idで判定） */
+export function finishLive(v) {
+  return commit((db) => {
+    const a = db.active;
+    if (!a) throw new UserError('進行中のセッションはありません（すでに保存済みの可能性があります）');
+    let s = db.sessions.find((x) => x.id === a.id);
+    if (!s) {
+      const now = Date.now();
+      s = {
+        id: a.id, ...v, rate: null,
+        startedAt: a.startedAt, endedAt: a.endedAt || now, tz: a.tz,
+        breakMinutes: Math.round(liveBreakMs(a, a.endedAt || now) / 60000),
+        timerMinutes: Math.round(liveElapsedMs(a, a.endedAt || now) / 60000),
+        createdAt: now, updatedAt: now,
+      };
+      db.sessions.push(s);
+    }
+    db.active = null;
+    rememberPrefs(db, v);
+    return s;
+  });
+}
+
+export function discardLive() {
+  return commit((db) => { db.active = null; });
+}
+
+/* ---------------- 入力途中の内容 ---------------- */
+
+export function setDraft(key, data) {
+  return commit((db) => { db.drafts[key] = { ...data, savedAt: Date.now() }; }, { silent: true });
+}
+export function clearDraft(key) {
+  const db = getDb();
+  if (!db.drafts[key]) return;
+  try { commit((d) => { delete d.drafts[key]; }, { silent: true }); } catch { /* 下書き削除の失敗は無視 */ }
+}

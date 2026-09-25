@@ -1,0 +1,319 @@
+// セッション入力フォーム（過去のプレイの手入力／編集／タイマー終了後の精算）
+import { getDb } from '../store.js';
+import * as A from '../actions.js';
+import { resolvePending } from '../rates.js';
+import { validateSession, sessionProfit } from '../calc.js';
+import {
+  esc, todayYMD, fmtMoney, fmtBB, fmtHourly, fmtDuration, fmtInput, fmtTimeInTz, debounce, signClass, parseNumber,
+} from '../util.js';
+import { header, toast, showError, busy, confirmDialog, icons } from '../ui.js';
+import {
+  tripField, currencyField, textField, amountField, stakeFields, durationField, chipsHtml,
+  readForm, showErrors, clearErrors, attachNumberFormatting, unitOf,
+} from './fields.js';
+
+function splitMinutes(m) {
+  if (m == null || !Number.isFinite(m)) return { hours: '', mins: '' };
+  return { hours: String(Math.floor(m / 60)), mins: String(Math.round(m % 60)) };
+}
+
+function initialValues(db, mode, { session, active }) {
+  if (mode === 'finish') {
+    const a = active;
+    const elapsedMin = Math.max(1, Math.round(A.liveElapsedMs(a, a.endedAt || Date.now()) / 60000));
+    const auto = {
+      tripId: a.tripId || '', date: a.date, location: a.location, currency: a.currency,
+      sb: fmtInput(a.sb), bb: fmtInput(a.bb), ...splitMinutes(elapsedMin),
+      buyin: fmtInput(A.liveBuyinTotal(a)), cashout: '', timeRake: '', note: '',
+    };
+    if (a.draft) {
+      const v = { ...auto, ...a.draft };
+      if (!a.draft.durationEdited) Object.assign(v, splitMinutes(elapsedMin));
+      if (!a.draft.buyinEdited) v.buyin = auto.buyin;
+      return { values: v, restored: true };
+    }
+    return { values: auto, restored: false };
+  }
+  const key = mode === 'edit' ? `edit:${session.id}` : 'new-session';
+  const draft = db.drafts[key];
+  if (mode === 'edit') {
+    const s = session;
+    const base = {
+      tripId: s.tripId || '', date: s.date, location: s.location, currency: s.currency,
+      sb: fmtInput(s.sb), bb: fmtInput(s.bb), ...splitMinutes(s.minutes),
+      buyin: fmtInput(s.buyin), cashout: fmtInput(s.cashout), timeRake: s.timeRake ? fmtInput(s.timeRake) : '', note: s.note || '',
+    };
+    return draft ? { values: { ...base, ...draft }, restored: true } : { values: base, restored: false };
+  }
+  if (draft) return { values: draft, restored: true };
+  const cur = db.prefs.lastCurrency || 'USD';
+  const st = (db.prefs.stakes || {})[cur];
+  const date = todayYMD();
+  return {
+    values: {
+      tripId: A.defaultTripId(db, date), date, location: db.prefs.lastLocation || '', currency: cur,
+      sb: st ? fmtInput(st.sb) : '', bb: st ? fmtInput(st.bb) : '', hours: '', mins: '',
+      buyin: '', cashout: '', timeRake: '', note: '',
+    },
+    restored: false,
+  };
+}
+
+export function renderSessionForm(el, { mode, id }) {
+  const db = getDb();
+  const session = mode === 'edit' ? db.sessions.find((s) => s.id === id) : null;
+  const active = mode === 'finish' ? db.active : null;
+
+  if (mode === 'edit' && !session) {
+    el.innerHTML = header({ title: '記録の編集', back: '#/sessions' }) + `<div class="page"><div class="notice notice-warn">${icons.alert}<div>この記録は見つかりません。削除された可能性があります。</div></div></div>`;
+    return;
+  }
+  if (mode === 'finish' && !active) {
+    el.innerHTML = header({ title: '精算', back: '#/' }) + `<div class="page"><div class="notice">${icons.check}<div>進行中のセッションはありません。保存済みの記録は「記録」タブで確認できます。</div></div><a class="btn btn-ghost btn-block" href="#/sessions">記録を見る</a></div>`;
+    return;
+  }
+  if (mode === 'finish' && active.status !== 'settling') {
+    // 直接URLで来た場合でもタイマーを止めて精算状態にする
+    try { A.settleLive(); } catch (e) { showError(e); }
+    return renderSessionForm(el, { mode, id });
+  }
+
+  const draftKey = mode === 'edit' ? `edit:${id}` : 'new-session';
+  const { values: v, restored } = initialValues(db, mode, { session, active: mode === 'finish' ? getDb().active : null });
+  let durationEdited = !!(active && active.draft && active.draft.durationEdited);
+  let buyinEdited = !!(active && active.draft && active.draft.buyinEdited);
+  const a = mode === 'finish' ? getDb().active : null;
+
+  const title = mode === 'new' ? '過去のプレイを記録' : mode === 'edit' ? '記録の編集' : '精算して保存';
+  const back = mode === 'new' ? '#/' : mode === 'edit' ? `#/sessions/${id}` : '#/';
+  const trOpen = !!(v.timeRake && parseNumber(v.timeRake).value > 0);
+
+  const timerInfo = a ? `
+    <div class="timer-summary">
+      <div><span class="k">開始</span><span class="v">${esc(fmtTimeInTz(a.startedAt, a.tz))}</span></div>
+      <div><span class="k">終了</span><span class="v">${esc(fmtTimeInTz(a.endedAt || Date.now(), a.tz))}</span></div>
+      <div><span class="k">休憩</span><span class="v">${esc(fmtDuration(Math.round(A.liveBreakMs(a, a.endedAt || Date.now()) / 60000)))}</span></div>
+      <div><span class="k">タイマー</span><span class="v">${esc(fmtDuration(Math.round(A.liveElapsedMs(a, a.endedAt || Date.now()) / 60000)))}</span></div>
+    </div>` : '';
+
+  el.innerHTML = `
+    ${header({ title, back })}
+    <div class="page">
+      ${restored && mode !== 'finish' ? `<div class="notice notice-info">${icons.check}<div>入力途中の内容を復元しました。<button type="button" class="link" data-act="discard-draft">破棄して最初から</button></div></div>` : ''}
+      ${restored && mode === 'finish' ? `<div class="notice notice-info">${icons.check}<div>入力途中の内容を復元しました。</div></div>` : ''}
+      ${timerInfo}
+      <form class="form" novalidate autocomplete="off">
+        <div class="form-summary" role="alert" hidden></div>
+
+        ${mode === 'finish' ? `
+          <section class="card form-card form-card-accent">
+            ${amountField({ name: 'cashout', label: '合計キャッシュアウト', value: v.cashout, unit: unitOf(v.currency), big: true, hint: '最後に持ち帰ったチップの合計額（回収0なら0）' })}
+            ${amountField({ name: 'buyin', label: '合計バイイン（リバイ・追加購入込み）', value: v.buyin, unit: unitOf(v.currency), hint: 'プレイ中に記録した額を自動入力しています' })}
+            <div class="preview" data-preview></div>
+          </section>` : ''}
+
+        <section class="card form-card">
+          ${tripField(db, v.tripId)}
+          <label class="field">
+            <span class="field-label">プレイ日</span>
+            <input class="input" type="date" name="date" value="${esc(v.date)}" required>
+            ${mode === 'finish' ? '<span class="field-hint">開始した現地の日付です。必要なら修正してください。</span>' : ''}
+            <span class="field-error" data-err="date"></span>
+            <span class="field-note" data-rate-note hidden></span>
+          </label>
+          ${textField({ name: 'location', label: '場所・店舗名', value: v.location, placeholder: '例：Club A', list: 'loc-list' })}
+          <datalist id="loc-list">${A.recentLocations(db, 20).map((l) => `<option value="${esc(l)}">`).join('')}</datalist>
+          <div class="chips" data-loc-chips>${chipsHtml(A.recentLocations(db, 5).map((l) => ({ label: l, data: { location: l } })))}</div>
+          ${currencyField(v.currency)}
+          ${stakeFields(v.sb, v.bb)}
+          ${durationField(v.hours, v.mins, mode === 'finish' ? 'タイマーの計測値（休憩を除く）。補正する場合は書き換えてください。' : '')}
+        </section>
+
+        ${mode !== 'finish' ? `
+          <section class="card form-card">
+            ${amountField({ name: 'buyin', label: '合計バイイン（リバイ・追加購入込み）', value: v.buyin, unit: unitOf(v.currency) })}
+            ${amountField({ name: 'cashout', label: '合計キャッシュアウト', value: v.cashout, unit: unitOf(v.currency), hint: '回収0の場合は0を入力' })}
+            <div class="preview" data-preview></div>
+          </section>` : ''}
+
+        <section class="card form-card">
+          <details class="disclosure" ${trOpen ? 'open' : ''}>
+            <summary>
+              <span>タイムレーキ（別払い）</span>
+              <span class="disclosure-value" data-tr-summary></span>
+            </summary>
+            ${amountField({ name: 'timeRake', label: '別払いしたタイムレーキの合計', value: v.timeRake, unit: unitOf(v.currency), hint: '手持ち現金など<b>チップ以外から別払いした分だけ</b>を入力します。チップから払った分（キャッシュアウトに反映済み）やポットから引かれたレーキは入力しないでください。' })}
+          </details>
+          <label class="field">
+            <span class="field-label">メモ（任意）</span>
+            <textarea class="input" name="note" rows="2" maxlength="500" placeholder="卓の様子など">${esc(v.note)}</textarea>
+          </label>
+        </section>
+
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary btn-block btn-lg" data-act="save">${icons.check}<span>${mode === 'edit' ? '変更を保存' : '保存する'}</span></button>
+          ${mode === 'finish' ? `
+            <button type="button" class="btn btn-ghost btn-block" data-act="back-to-play">${icons.play}<span>プレイに戻る（タイマー再開）</span></button>
+            <button type="button" class="btn btn-text-danger btn-block" data-act="discard-live">このセッションを破棄</button>` : `
+            <button type="button" class="btn btn-ghost btn-block" data-act="cancel">キャンセル</button>`}
+          <p class="draft-status" data-draft-status aria-live="polite"></p>
+        </div>
+      </form>
+    </div>`;
+
+  const form = el.querySelector('form');
+  attachNumberFormatting(form);
+  const cur = () => form.querySelector('[name="currency"]:checked')?.value || 'USD';
+
+  function refreshCurrency() {
+    const c = cur();
+    form.querySelectorAll('[data-unit]').forEach((u) => { u.textContent = unitOf(c); });
+    const chips = form.querySelector('[data-stake-chips]');
+    chips.innerHTML = chipsHtml(A.recentStakes(getDb(), c).map((s) => ({ label: `${s.sb}/${s.bb}`, data: { sb: s.sb, bb: s.bb } })));
+  }
+
+  function refreshPreview() {
+    const raw = readForm(form);
+    const r = validateSession({ ...raw, location: raw.location || 'x', date: raw.date || todayYMD() });
+    const box = form.querySelector('[data-preview]');
+    const trBox = form.querySelector('[data-tr-summary]');
+    const tr = parseNumber(raw.timeRake, { allowEmpty: true });
+    trBox.textContent = tr.ok && tr.value ? fmtMoney(-tr.value, raw.currency) : '0（初期値）';
+    const need = ['buyin', 'cashout', 'bb', 'sb'];
+    if (need.some((k) => r.errors[k]) || raw.cashout === '') {
+      box.innerHTML = '<span class="muted">金額を入力すると収支を表示します</span>';
+      return;
+    }
+    const p = sessionProfit(r.value);
+    const bbw = p / r.value.bb;
+    const hourly = r.value.minutes ? fmtHourly(p / (r.value.minutes / 60), raw.currency) : '—';
+    box.innerHTML = `
+      <div class="preview-main ${signClass(p)}">${esc(fmtMoney(p, raw.currency))}</div>
+      <div class="preview-sub">${esc(fmtBB(bbw))}<span class="dot-sep">·</span>${esc(hourly)}${r.value.timeRake ? `<span class="dot-sep">·</span>別払いレーキ控除後` : ''}</div>`;
+  }
+
+  function refreshRateNote() {
+    if (mode !== 'edit') return;
+    const raw = readForm(form);
+    const note = form.querySelector('[data-rate-note]');
+    const changed = raw.date !== session.date || raw.currency !== session.currency;
+    const hadRate = session.currency !== 'JPY' && session.rate;
+    note.hidden = !(changed && (hadRate || raw.currency !== 'JPY'));
+    note.textContent = session.rate && session.rate.manual
+      ? 'プレイ日または通貨を変更したため、保存時に手入力レートを解除し、新しいプレイ日のレートを取り直します。'
+      : 'プレイ日または通貨を変更したため、保存時に新しいプレイ日の円換算レートを取り直します。';
+  }
+
+  const status = form.querySelector('[data-draft-status]');
+  const saveDraft = debounce(() => {
+    const raw = readForm(form);
+    try {
+      if (mode === 'finish') A.saveLiveDraft({ ...raw, durationEdited, buyinEdited });
+      else A.setDraft(draftKey, raw);
+      status.textContent = '入力途中の内容は自動で保存されています';
+      status.classList.remove('warn');
+    } catch (e) {
+      status.textContent = '入力途中の内容を端末に保存できていません（画面を閉じると失われます）';
+      status.classList.add('warn');
+    }
+  }, 350);
+
+  form.addEventListener('input', (e) => {
+    const n = e.target.name;
+    if (n === 'hours' || n === 'mins') durationEdited = true;
+    if (n === 'buyin') buyinEdited = true;
+    if (n === 'currency') refreshCurrency();
+    if (e.target.getAttribute('aria-invalid')) {
+      e.target.removeAttribute('aria-invalid');
+      const errKey = n === 'hours' || n === 'mins' ? 'duration' : n;
+      const err = form.querySelector(`[data-err="${errKey}"]`);
+      if (err) err.textContent = '';
+    }
+    refreshPreview();
+    refreshRateNote();
+    saveDraft();
+  });
+  form.addEventListener('change', () => { refreshRateNote(); saveDraft(); });
+
+  form.addEventListener('click', async (e) => {
+    const chip = e.target.closest('[data-chip]');
+    if (chip) {
+      const d = JSON.parse(chip.dataset.chip);
+      if (d.location) form.location.value = d.location;
+      if (d.bb != null) { form.sb.value = fmtInput(d.sb); form.bb.value = fmtInput(d.bb); }
+      form.dispatchEvent(new Event('input', { bubbles: true }));
+      return;
+    }
+    const btn = e.target.closest('[data-act]');
+    if (!btn) return;
+    const act = btn.dataset.act;
+    if (act === 'cancel') {
+      e.preventDefault();
+      saveDraft.cancel();
+      A.clearDraft(draftKey);
+      location.hash = back;
+    } else if (act === 'back-to-play') {
+      await busy(btn, async () => {
+        saveDraft.flush();
+        try { A.backToPlay(); location.hash = '#/'; } catch (err) { showError(err); }
+      });
+    } else if (act === 'discard-live') {
+      const ok = await confirmDialog({
+        title: 'このセッションを破棄しますか？',
+        message: 'タイマーと入力内容は保存されずに消えます。この操作は取り消せません。',
+        confirmText: '破棄する', danger: true,
+      });
+      if (!ok) return;
+      saveDraft.cancel();
+      try { A.discardLive(); toast('セッションを破棄しました'); location.hash = '#/'; } catch (err) { showError(err); }
+    }
+  });
+  el.querySelector('[data-act="discard-draft"]')?.addEventListener('click', () => {
+    saveDraft.cancel();
+    A.clearDraft(draftKey);
+    renderSessionForm(el, { mode, id });
+  });
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = form.querySelector('[data-act="save"]');
+    await busy(btn, async () => {
+      const raw = readForm(form);
+      const r = validateSession(raw);
+      if (!r.ok) { showErrors(form, r.errors); return; }
+      clearErrors(form);
+      saveDraft.cancel();
+      const doSave = async () => {
+        if (mode === 'new') {
+          const s = A.createSession(r.value);
+          A.clearDraft(draftKey);
+          toast('記録を保存しました', { type: 'success' });
+          location.hash = `#/sessions/${s.id}`;
+          resolvePending({ only: [s.id] });
+        } else if (mode === 'edit') {
+          const { rateReset } = A.updateSession(id, r.value);
+          A.clearDraft(draftKey);
+          toast('変更を保存しました', { type: 'success' });
+          location.hash = `#/sessions/${id}`;
+          if (rateReset) resolvePending({ only: [id] });
+        } else {
+          const s = A.finishLive(r.value);
+          toast('セッションを保存しました', { type: 'success' });
+          location.hash = `#/sessions/${s.id}`;
+          resolvePending({ only: [s.id] });
+        }
+      };
+      try {
+        await doSave();
+      } catch (err) {
+        saveDraft();
+        showError(err, err.name === 'SaveError' ? () => form.requestSubmit() : null);
+      }
+    });
+  });
+
+  refreshCurrency();
+  refreshPreview();
+  refreshRateNote();
+  if (mode === 'finish' && !v.cashout) setTimeout(() => form.cashout.focus({ preventScroll: true }), 50);
+}
