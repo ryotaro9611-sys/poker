@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>TRIP LEDGER｜ポーカー遠征収支</title>
+  <meta name="description" content="海外ライブポーカー遠征のプレイ時間・成績・遠征損益を記録するアプリ">
+  <meta name="theme-color" content="#070a12">
+  <meta name="color-scheme" content="dark">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="遠征収支">
+  <meta name="format-detection" content="telephone=no">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png" type="image/png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <div id="banner"></div>
+  <main id="view" aria-live="off">
+    <div id="boot" class="boot">
+      <div class="boot-mark">TRIP LEDGER</div>
+      <p class="boot-text">読み込み中…</p>
+      <noscript><p class="boot-text">このアプリには JavaScript が必要です。</p></noscript>
+    </div>
+  </main>
+  <div id="livebar" hidden></div>
+  <nav id="tabbar" aria-label="メインメニュー"></nav>
+  <div id="toast-root"></div>
+  <div id="modal-root"></div>
+  <script>
+    // 読み込みに失敗した場合（古いブラウザ・通信断で未キャッシュ等）の案内
+    setTimeout(function () {
+      if (!document.documentElement.classList.contains('ready')) {
+        var b = document.getElementById('boot');
+        if (b) b.innerHTML = '<div class="boot-mark">TRIP LEDGER</div><p class="boot-text">読み込みに時間がかかっています。<br>初回はオンラインで開く必要があります。</p><button type="button" class="btn btn-ghost" onclick="location.reload()">再読み込み</button>';
+      }
+    }, 6000);
+  </script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

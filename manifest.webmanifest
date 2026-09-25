@@ -1,0 +1,17 @@
+{
+  "name": "TRIP LEDGER｜ポーカー遠征収支",
+  "short_name": "遠征収支",
+  "description": "海外ライブポーカー遠征のプレイ時間・成績・遠征損益の記録",
+  "lang": "ja",
+  "start_url": "./#/",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#070a12",
+  "theme_color": "#070a12",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

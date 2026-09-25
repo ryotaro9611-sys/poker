@@ -17,7 +17,7 @@ function splitMinutes(m) {
   return { hours: String(Math.floor(m / 60)), mins: String(Math.round(m % 60)) };
 }
 
-function initialValues(db, mode, { session, active }) {
+function initialValues(db, mode, { session, active, presetTrip }) {
   if (mode === 'finish') {
     const a = active;
     const elapsedMin = Math.max(1, Math.round(A.liveElapsedMs(a, a.endedAt || Date.now()) / 60000));
@@ -51,7 +51,7 @@ function initialValues(db, mode, { session, active }) {
   const date = todayYMD();
   return {
     values: {
-      tripId: A.defaultTripId(db, date), date, location: db.prefs.lastLocation || '', currency: cur,
+      tripId: presetTrip && db.trips.some((t) => t.id === presetTrip) ? presetTrip : A.defaultTripId(db, date), date, location: db.prefs.lastLocation || '', currency: cur,
       sb: st ? fmtInput(st.sb) : '', bb: st ? fmtInput(st.bb) : '', hours: '', mins: '',
       buyin: '', cashout: '', timeRake: '', note: '',
     },
@@ -59,7 +59,7 @@ function initialValues(db, mode, { session, active }) {
   };
 }
 
-export function renderSessionForm(el, { mode, id }) {
+export function renderSessionForm(el, { mode, id, presetTrip }) {
   const db = getDb();
   const session = mode === 'edit' ? db.sessions.find((s) => s.id === id) : null;
   const active = mode === 'finish' ? db.active : null;
@@ -79,7 +79,7 @@ export function renderSessionForm(el, { mode, id }) {
   }
 
   const draftKey = mode === 'edit' ? `edit:${id}` : 'new-session';
-  const { values: v, restored } = initialValues(db, mode, { session, active: mode === 'finish' ? getDb().active : null });
+  const { values: v, restored } = initialValues(db, mode, { session, active: mode === 'finish' ? getDb().active : null, presetTrip });
   let durationEdited = !!(active && active.draft && active.draft.durationEdited);
   let buyinEdited = !!(active && active.draft && active.draft.buyinEdited);
   const a = mode === 'finish' ? getDb().active : null;
@@ -218,8 +218,14 @@ export function renderSessionForm(el, { mode, id }) {
     }
   }, 350);
 
+  let tripTouched = mode !== 'new' || restored;
   form.addEventListener('input', (e) => {
     const n = e.target.name;
+    if (n === 'tripId') tripTouched = true;
+    if (n === 'date' && !tripTouched) {
+      const t = A.tripForDate(getDb(), e.target.value);
+      if (t) form.tripId.value = t.id;
+    }
     if (n === 'hours' || n === 'mins') durationEdited = true;
     if (n === 'buyin') buyinEdited = true;
     if (n === 'currency') refreshCurrency();

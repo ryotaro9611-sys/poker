@@ -27,7 +27,7 @@ function compact(v, unit) {
  * series: [{date, day, count, cum}]（期間内の日付順、cum は期間開始からの累計）
  * opts: { unit: '円' | 'USD' ..., format: (v)=>string }
  */
-export function mountChart(container, series, { unit, format }) {
+export function mountChart(container, series, { unit, format, cumLabel = '期間内累計' }) {
   const pts = [{ date: null, day: 0, cum: 0, count: 0 }, ...series];
   let sel = pts.length - 1;
   container.innerHTML = `
@@ -41,13 +41,13 @@ export function mountChart(container, series, { unit, format }) {
   function updateReadout() {
     const pt = pts[sel];
     if (!pt.date) {
-      readout.innerHTML = `<span class="ro-date">期間の開始</span><span class="ro-cum zero">累計 ${esc(format(0))}</span>`;
+      readout.innerHTML = `<span class="ro-date">期間の開始</span><span class="ro-cum zero">${esc(cumLabel)} ${esc(format(0))}</span>`;
       return;
     }
     readout.innerHTML = `
       <span class="ro-date">${esc(fmtDate(pt.date))}${pt.count > 1 ? ` <small>${pt.count}件</small>` : ''}</span>
       <span class="ro-day ${signClass(pt.day)}">当日 ${esc(format(pt.day))}</span>
-      <span class="ro-cum ${signClass(pt.cum)}">期間内累計 ${esc(format(pt.cum))}</span>`;
+      <span class="ro-cum ${signClass(pt.cum)}">${esc(cumLabel)} ${esc(format(pt.cum))}</span>`;
   }
 
   function draw() {

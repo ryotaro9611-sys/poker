@@ -167,9 +167,9 @@ export function validateSession(raw) {
 
   const sb = parseNumber(raw.sb, { min: 0 });
   const bb = parseNumber(raw.bb, { min: 0 });
-  if (!sb.ok) errors.sb = sb.error;
+  if (!sb.ok) errors.sb = 'SB：' + sb.error;
   else v.sb = sb.value;
-  if (!bb.ok) errors.bb = bb.error;
+  if (!bb.ok) errors.bb = 'BB：' + bb.error;
   else if (bb.value <= 0) errors.bb = 'BBは0より大きい値にしてください';
   else v.bb = bb.value;
   if (v.sb != null && v.bb != null && v.sb > v.bb) errors.sb = 'SBはBB以下にしてください';
