@@ -239,6 +239,22 @@ t('読み込み：壊れたタイマーは可能な範囲で修復して残す',
   const a = validateData({ ...empty, active }, { strict: false }).data.active;
   assert.ok(a, '進行中のタイマーを捨てない');
   assert.equal(a.segments.filter((g) => g.e == null).length, 1, '終わっていない区間は最後の1つだけ');
+  assert.equal(a.status, 'playing');
+  // 区間1（1時間）＋区間2（30分で次の区間の開始まで）＋区間3（進行中）
+  assert.equal(a.segments[1].e, now - 1800e3, '重なった区間は次の開始で閉じる');
+  assert.ok(Array.isArray(a.repairs) && a.repairs.length >= 1, '修復した内容をタイマーに残す（画面で知らせる）');
+
+  // 最後の区間が閉じているのにプレイ中 → 休憩中に直し、知らせる
+  const closed = { ...active, segments: [{ s: now - 3600e3, e: now - 600e3 }] };
+  const c = validateData({ ...empty, active: closed }, { strict: false }).data.active;
+  assert.equal(c.status, 'break');
+  assert.ok(c.repairs.some((m) => m.includes('休憩中')), c.repairs.join());
+
+  // バイインの日時だけ壊れていても金額は残す
+  const b = validateData({ ...empty, active: { ...active, currency: 'JPY', segments: [{ s: now - 3600e3, e: null }], buyins: [{ amount: 1000, at: 'broken' }, { amount: 'x', at: now }] } }, { strict: false }).data.active;
+  assert.equal(b.buyins.length, 1);
+  assert.equal(b.buyins[0].amount, 1000, '金額は残す');
+  assert.ok(b.repairs.some((m) => m.includes('金額')), '読めない金額があったことを知らせる');
 });
 
 t('夏時間：秋の重複時刻はどの地域でも早いほう', () => {

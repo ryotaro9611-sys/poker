@@ -32,28 +32,46 @@ let generation = 0;
 let quarantined = null;
 const listeners = new Set();
 // blocked: 壊れたデータの退避に失敗したため、元データを上書きしないよう保存を止めている
-export const status = { storageOk: true, notice: null, blocked: false };
+// repaired: 直して開いたことを知らせるバナーの文言（閉じるまで表示）
+export const status = { storageOk: true, notice: null, blocked: false, repaired: null };
 
 /** 端末内データの読み込み：不正な記録は除外し、元データは消さずに別キーへ退避する */
+/**
+ * 元データを別キーに退避する。成功するまでは status.blocked にして、元データの上書き（保存）を止める。
+ */
+function quarantine(raw, doneNotice, reason) {
+  if (quarantined === raw) return true;
+  try {
+    localStorage.setItem(`${KEY}:corrupt:${Date.now()}`, raw);
+    quarantined = raw; // 退避できたときだけ処理済みにする
+    status.blocked = false;
+    status.notice = doneNotice;
+    status.repaired = doneNotice;
+    return true;
+  } catch {
+    status.blocked = true;
+    status.notice = `保存データに不正な値がありますが、元のデータを退避できなかったため、保存を止めています（空き容量不足の可能性）。表示中の内容はそのままバックアップできます。容量を空けてからアプリを開き直してください。（${reason}）`;
+    return false;
+  }
+}
+
+/** 端末内データの読み込み：不正な項目は直し（収支が壊れた記録は除外）、元データは消さずに退避する */
 function normalize(d, raw) {
   const { data, problems } = validateData(d, { strict: false });
   if (!problems.length) {
     status.blocked = false;
     return data;
   }
-  if (quarantined !== raw) {
-    try {
-      localStorage.setItem(`${KEY}:corrupt:${Date.now()}`, raw);
-      quarantined = raw; // 退避できたときだけ処理済みにする
-      status.blocked = false;
-      status.notice = `保存データの一部に不正な値があったため、直して開きました（${problems.length}件：${problems[0]}）。元のデータは端末内に退避しています。`;
-    } catch {
-      // 退避できない間は、元データを直したデータで上書きしない
-      status.blocked = true;
-      status.notice = `保存データの一部に不正な値がありますが、元のデータを退避できなかったため、保存を止めています（空き容量不足の可能性）。表示中の内容はそのままバックアップできます。容量を空けてからアプリを開き直してください。（${problems[0]}）`;
-    }
-  }
+  quarantine(raw, `保存データの一部に不正な値があったため、直して開きました（${problems.length}件：${problems[0]}）。元のデータは端末内に退避しています。`, problems[0]);
   return data || emptyDb();
+}
+
+/** 正常なデータで置き換えたら（復元・全削除）、停止や修復の表示を解除する */
+function clearRecoveryState() {
+  status.blocked = false;
+  status.notice = null;
+  status.repaired = null;
+  quarantined = null;
 }
 
 function readReal() {
@@ -66,14 +84,15 @@ function readReal() {
     return real || emptyDb();
   }
   if (!raw) return emptyDb();
+  let parsed;
   try {
-    return normalize(JSON.parse(raw), raw);
-  } catch (e) {
-    // 壊れたデータは消さずに退避してから空で開始
-    try { localStorage.setItem(`${KEY}:corrupt:${Date.now()}`, raw); } catch { /* noop */ }
-    status.notice = '保存データを読み込めなかったため、元データを退避して空の状態で開きました。設定画面のバックアップから復元できます。';
+    parsed = JSON.parse(raw);
+  } catch {
+    // JSONとして読めない：退避できたら空で開始、退避できなければ保存を止める
+    quarantine(raw, '保存データを読み込めなかったため、元のデータを端末内に退避して空の状態で開きました。バックアップがあれば設定画面から復元できます。', 'データを読み込めません');
     return emptyDb();
   }
+  return normalize(parsed, raw);
 }
 
 export function init() {
@@ -204,6 +223,7 @@ export function importJson(text) {
     throw new SaveError(e);
   }
   real = next;
+  clearRecoveryState();
   emit();
   return { trips: next.trips.length, sessions: next.sessions.length };
 }
@@ -213,5 +233,10 @@ export function wipeAll() {
   const next = emptyDb();
   try { localStorage.setItem(KEY, JSON.stringify(next)); } catch (e) { throw new SaveError(e); }
   real = next;
+  clearRecoveryState();
   emit();
+}
+
+export function dismissRepaired() {
+  status.repaired = null;
 }

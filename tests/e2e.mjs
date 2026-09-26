@@ -953,16 +953,15 @@ test('ダイアログで保存した後、開いたボタンにフォーカス�
 test('為替：取得中に何度呼ばれても、同じ日付の取得を重複させない', async () => {
   await fresh();
   rateMode = 'hold';
+  const before = rateRequests.length;
   await manualSession({ date: '2026-04-04' });
   await waitFor(`true`);
-  await sleep(200);
-  const before = rateRequests.length;
   await ev(`import('./js/rates.js').then((m) => { for (let i = 0; i < 5; i++) m.resolvePending(); return 1; })`);
   rateMode = 'fail';
   releaseHeld('fail');
-  await sleep(1500);
+  await ev(`import('./js/rates.js').then((m) => m.whenIdle())`);
   const n = rateRequests.length - before;
-  assert(n <= 2, `通信回数 ${n + 1}回（Frankfurter 1回＋予備 1回まで）`);
+  assert(n === 2, `通信回数 ${n}回（Frankfurter 1回＋予備 1回のはず）`);
   rateMode = 'ok';
 });
 
@@ -972,6 +971,137 @@ test('端末内の下書きが壊れていても、入力画面を開ける', as
   await go('#/sessions/new');
   await waitFor(`document.querySelector('[name=cashout]')`, 3000, '入力画面');
   assert((await ev(`document.querySelector('[name=cashout]').value`)) === '12', '正常な項目は復元');
+});
+
+/* ---------- 3回目のレビュー指摘の回帰テスト ---------- */
+
+test('N2：競合で保存を止めた古い精算画面の下書きが、最新の内容を上書きしない', async () => {
+  await fresh();
+  await seed({ active: liveSettling({ rev: 3 }) });
+  await go('#/live/finish');
+  await waitFor(`document.querySelector('[name=cashout]')`);
+  await setVal('[name=cashout]', '300');
+  // 別タブ：プレイに戻って BB と場所を直し、もう一度精算画面を開いた状態
+  await ev(`(() => { const d = JSON.parse(localStorage.getItem('tripledger:data:v1')); const a = d.active; a.bb = 10; a.sb = 5; a.location = 'B-loc'; a.rev = 7; a.draft = { location: 'B-loc', sb: '5', bb: '10', cashout: '' }; localStorage.setItem('tripledger:data:v1', JSON.stringify(d)); })()`);
+  await setVal('[name=cashout]', '400'); // 古い画面での入力（下書き保存が走る）
+  await click('[data-act=save]');
+  await waitFor(`document.querySelector('.toast-error')`, 3000, '競合の通知');
+  await sleep(600); // 下書きの保存予約が実行されるのを待つ
+  const d = await data();
+  assert(d.active.draft.bb === '10' && d.active.draft.location === 'B-loc', `最新の下書きを上書きしない（${JSON.stringify(d.active.draft)}）`);
+  await reload(); // 案内どおり開き直す
+  await waitFor(`document.querySelector('[name=bb]')`);
+  const v = await ev(`({ bb: document.querySelector('[name=bb]').value, loc: document.querySelector('[name=location]').value })`);
+  assert(v.bb === '10' && v.loc === 'B-loc', `開き直すと最新の内容（${JSON.stringify(v)}）`);
+});
+
+test('N4：冴えだけ直しても、精算で手で直した場所・ブラインドは戻らない', async () => {
+  await fresh();
+  await seed({ active: liveSettling() });
+  await go('#/live/finish');
+  await waitFor(`document.querySelector('[name=cashout]')`);
+  await setVal('[name=location]', 'Manual');
+  await setVal('[name=sb]', '10'); await setVal('[name=bb]', '20');
+  await click('[data-act=back-to-play]');
+  await waitFor(`location.hash === '#/'`);
+  await click('.live-edit');
+  await waitFor(`document.querySelector('[name=startedAt]')`);
+  await click('input[name=condition][value="4"]');
+  await click('[data-act=save]');
+  await waitFor(`location.hash === '#/'`);
+  await click('[data-live=finish]');
+  await waitFor(`document.querySelector('[name=cashout]')`);
+  const v = await ev(`({ loc: document.querySelector('[name=location]').value, bb: document.querySelector('[name=bb]').value, cond: document.querySelector('input[name=condition]:checked')?.value })`);
+  assert(v.loc === 'Manual' && v.bb === '20', `手で直した値が残る（${JSON.stringify(v)}）`);
+  assert(v.cond === '4', '直した冴えは反映');
+});
+
+test('N1：JSONとして読めない保存データで退避にも失敗したら、上書き保存を止める', async () => {
+  await fresh();
+  const script = await send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => { const o = Storage.prototype.setItem; Storage.prototype.setItem = function (k, v) { if (String(k).includes(':corrupt:')) throw new DOMException('quota', 'QuotaExceededError'); return o.call(this, k, v); }; })()` });
+  try {
+    await ev(`localStorage.setItem('tripledger:data:v1', '{"trips":[')`);
+    await reload();
+    includes(await text('#banner'), '退避できなかった', 'バナー');
+    await go('#/trips/new');
+    await setVal('[name=name]', 'New');
+    await click('[data-act=save]');
+    await waitFor(`document.querySelector('.toast-error')`, 3000, '保存を止める');
+    assert(await ev(`localStorage.getItem('tripledger:data:v1')`) === '{"trips":[', '元データは上書きしない');
+  } finally {
+    await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: script.identifier });
+  }
+  await reload();
+  assert(await ev(`Object.keys(localStorage).some((k) => k.includes(':corrupt:') && localStorage.getItem(k) === '{"trips":[')`), '次の起動で退避できる');
+});
+
+test('N3・N6：タイマーを修復したら、進行中カードと精算画面で知らせ、確認してから精算する', async () => {
+  await fresh();
+  const now = Date.now();
+  await seed({ active: { id: 'rp', tripId: null, location: 'R', currency: 'JPY', sb: 1, bb: 2, date: '2026-09-20', tz: 'Asia/Tokyo', startedAt: now - 3600e3, segments: [{ s: now - 3600e3, e: null }], status: 'playing', buyins: [{ amount: 1000, at: 'broken' }], draft: null } });
+  let t = await text('.live-card');
+  includes(t, '1,000円', 'バイイン金額は残る');
+  includes(t, '修復', '進行中カードで知らせる');
+  await click('[data-live=finish]');
+  await waitFor(`document.querySelector('[name=cashout]')`);
+  includes(await text(), '修復', '精算画面で知らせる');
+  assert((await ev(`document.querySelector('[name=buyin]').value`)) === '1,000', '合計バイインは1,000');
+  await setVal('[name=cashout]', '1500');
+  await click('[data-act=save]');
+  await waitFor(`document.querySelector('[data-err=repairAck]')?.textContent`, 3000, '確認を求める');
+  assert((await data()).sessions.length === 0, '確認前は保存しない');
+  await click('[name=repairAck]');
+  await click('[data-act=save]');
+  await waitFor(`/^#\\/sessions\\/[^/n]/.test(location.hash)`, 3000, '確認後に保存');
+  const s0 = (await data()).sessions[0];
+  assert(s0.buyin === 1000 && s0.cashout === 1500, '収支は+500円');
+});
+
+test('N5：保存が止まっている間に精算画面を開いても、処理を繰り返さずに案内する', async () => {
+  await fresh();
+  const script = await send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => { const o = Storage.prototype.setItem; Storage.prototype.setItem = function (k, v) { if (String(k).includes(':corrupt:')) throw new DOMException('quota', 'QuotaExceededError'); return o.call(this, k, v); }; })()` });
+  try {
+    const now = Date.now();
+    await seed({ trips: [{ id: 't1', name: 'T', startDate: '2026-04-01', endDate: null, expenses: null, note: 7 }], active: { id: 'p', tripId: null, location: 'P', currency: 'USD', sb: 1, bb: 2, date: '2026-09-20', tz: 'Asia/Tokyo', startedAt: now - 3600e3, segments: [{ s: now - 3600e3, e: null }], status: 'playing', buyins: [], draft: null } });
+    await ev(`window.__saves = 0; const o = Storage.prototype.setItem; Storage.prototype.setItem = function (...a) { window.__saves++; return o.apply(this, a); }`);
+    await go('#/live/finish');
+    await sleep(500);
+    includes(await text(), '精算画面を開けませんでした', '案内');
+    assert((await ev('window.__saves')) < 5, `保存の試行を繰り返さない（${await ev('window.__saves')}回）`);
+    assert(await ev(`JSON.parse(localStorage.getItem('tripledger:data:v1')).active.status === 'playing'`), 'タイマーはそのまま');
+  } finally {
+    await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: script.identifier });
+  }
+});
+
+test('N7：保存停止中に正常なバックアップを復元したら、停止の表示が消える', async () => {
+  await fresh();
+  const script = await send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => { const o = Storage.prototype.setItem; Storage.prototype.setItem = function (k, v) { if (String(k).includes(':corrupt:')) throw new DOMException('quota', 'QuotaExceededError'); return o.call(this, k, v); }; })()` });
+  try {
+    await seed({ trips: [{ id: 't1', name: 'T', startDate: '2026-04-01', endDate: null, expenses: null, note: 7 }] });
+    assert(await ev(`!!document.querySelector('.banner-error')`), '停止中');
+    await importFile({ data: { trips: [], sessions: [baseSession] } });
+    await waitFor(`!document.querySelector('.banner-error')`, 3000, '停止の表示が消える');
+    assert(await ev(`import('./js/store.js').then((m) => !m.status.blocked)`), '保存を再開');
+  } finally {
+    await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: script.identifier });
+  }
+});
+
+test('N8：ダイアログを開いたまま別の画面へ移ったら、別の対象のボタンにフォーカスを戻さない', async () => {
+  await fresh();
+  await seed({ trips: [{ id: 'ta', name: 'A', startDate: '2026-04-01', endDate: null, expenses: 1 }, { id: 'tb', name: 'B', startDate: '2026-05-01', endDate: null, expenses: 2 }] });
+  await go('#/trips/tb');
+  await go('#/trips/ta');
+  await ev(`(() => { const b = document.querySelector('[data-act=expenses]'); b.focus(); b.click(); })()`);
+  await waitFor(`document.querySelector('.modal input')`);
+  await ev(`history.back()`);
+  await waitFor(`location.hash === '#/trips/tb'`);
+  await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+  await waitFor(`!document.querySelector('.modal-backdrop')`);
+  await sleep(100);
+  assert((await ev(`document.activeElement?.dataset?.act`)) !== 'expenses', 'Bの経費ボタンにフォーカスしない');
+  assert(await ev(`document.activeElement?.classList.contains('page-title')`), '画面の見出しに戻す');
 });
 
 test('画面幅：375px・430px で横にはみ出さない', async () => {

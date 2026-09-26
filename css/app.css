@@ -621,3 +621,7 @@ a.stat-sub { color: var(--text-2); text-decoration: underline; text-decoration-c
   .cond-dot { width: 34px; height: 34px; }
 }
 .be-line .be-hold { background: var(--warn-soft); color: var(--warn); }
+.banner-warn { background: #2e2512; color: #f3dcae; border-bottom: 1px solid rgba(227, 184, 102, 0.35); }
+.repair-notice > div span { display: block; }
+.check-field { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border-radius: 12px; background: var(--warn-soft); border: 1px solid rgba(227, 184, 102, 0.3); font-size: 14px; cursor: pointer; }
+.check-field input { width: 20px; height: 20px; margin: 1px 0 0; accent-color: var(--accent); flex: none; }

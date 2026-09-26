@@ -76,9 +76,21 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
     return;
   }
   if (mode === 'finish' && active.status !== 'settling') {
-    // 直接URLで来た場合でもタイマーを止めて精算状態にする
-    try { A.settleLive(); } catch (e) { showError(e); }
-    return renderSessionForm(el, { mode, id, presetTrip });
+    // 直接URLで来た場合でもタイマーを止めて精算状態にする。失敗したら繰り返さずに案内する
+    try {
+      A.settleLive();
+    } catch (e) {
+      el.innerHTML = header({ title: '精算', back: '#/' }) + `
+        <div class="page">
+          <div class="notice notice-error">${icons.alert}<div><b>精算画面を開けませんでした</b><span>${esc(e.message)}</span></div></div>
+          <button type="button" class="btn btn-ghost btn-block" data-act="retry-settle">${icons.refresh}<span>もう一度試す</span></button>
+          <a class="btn btn-ghost btn-block" href="#/">ホームに戻る（タイマーはそのまま）</a>
+        </div>`;
+      el.querySelector('[data-act="retry-settle"]').addEventListener('click', () => renderSessionForm(el, { mode, id, presetTrip }));
+      return undefined;
+    }
+    if (getDb().active && getDb().active.status === 'settling') return renderSessionForm(el, { mode, id, presetTrip });
+    return undefined;
   }
 
   const draftKey = mode === 'edit' ? `edit:${id}` : 'new-session';
@@ -96,6 +108,15 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
   const back = mode === 'new' ? '#/' : mode === 'edit' ? `#/sessions/${id}` : '#/';
   const trOpen = !!(v.timeRake && parseNumber(v.timeRake).value > 0);
 
+  const repairs = a && Array.isArray(a.repairs) ? a.repairs : [];
+  const repairHtml = repairs.length ? `
+    <div class="notice notice-warn repair-notice" role="alert">
+      ${icons.alert}
+      <div>
+        <b>このセッションの記録を修復しています</b>
+        ${repairs.map((m) => `<span>・${esc(m)}</span>`).join('')}
+      </div>
+    </div>` : '';
   const timerInfo = a ? `
     <div class="timer-summary">
       <div><span class="k">開始</span><span class="v">${esc(fmtTimeInTz(a.startedAt, a.tz))}</span></div>
@@ -116,6 +137,7 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
       ${restored && mode !== 'finish' ? `<div class="notice notice-info">${icons.check}<div>入力途中の内容を復元しました。<button type="button" class="link" data-act="discard-draft">破棄して最初から</button></div></div>` : ''}
       ${restored && mode === 'finish' ? `<div class="notice notice-info">${icons.check}<div>入力途中の内容を復元しました。</div></div>` : ''}
       ${timerInfo}
+      ${repairHtml}
       <form class="form" novalidate autocomplete="off">
         <div class="form-summary" role="alert" hidden></div>
 
@@ -166,6 +188,12 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
           </label>
         </section>
 
+        ${repairs.length ? `
+          <label class="check-field">
+            <input type="checkbox" name="repairAck">
+            <span>修復した内容（上のお知らせ）と、合計バイイン・実プレイ時間を確認しました</span>
+          </label>
+          <span class="field-error" data-err="repairAck"></span>` : ''}
         <div class="form-actions">
           <button type="submit" class="btn btn-primary btn-block btn-lg" data-act="save">${icons.check}<span>${mode === 'edit' ? '変更を保存' : '保存する'}</span></button>
           ${mode === 'finish' ? `
@@ -224,11 +252,18 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
   const status = form.querySelector('[data-draft-status]');
   const saveDraft = debounce(() => {
     const raw = readForm(form);
+    delete raw.repairAck; // 確認欄は下書きに残さない（開き直したら改めて確認してもらう）
     try {
-      if (mode === 'finish') A.saveLiveDraft({ ...raw, durationEdited, buyinEdited }, { activeId, gen });
-      else A.setDraft(draftKey, raw, { gen });
-      status.textContent = '入力途中の内容は自動で保存されています';
-      status.classList.remove('warn');
+      const written = mode === 'finish'
+        ? A.saveLiveDraft({ ...raw, durationEdited, buyinEdited }, { activeId, gen, rev: activeRev })
+        : (A.setDraft(draftKey, raw, { gen }), true);
+      if (written) {
+        status.textContent = '入力途中の内容は自動で保存されています';
+        status.classList.remove('warn');
+      } else {
+        status.textContent = '別の画面でこのセッションが変更されたため、この画面の入力は保存していません。画面を開き直してください。';
+        status.classList.add('warn');
+      }
     } catch (e) {
       status.textContent = '入力途中の内容を端末に保存できていません（画面を閉じると失われます）';
       status.classList.add('warn');
@@ -303,7 +338,8 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
     await busy(btn, async () => {
       const raw = readForm(form);
       const r = validateSession(raw);
-      if (!r.ok) { showErrors(form, r.errors); return; }
+      if (repairs.length && !form.querySelector('[name="repairAck"]')?.checked) r.errors.repairAck = '修復した内容を確認してから保存してください';
+      if (Object.keys(r.errors).length) { showErrors(form, r.errors); return; }
       clearErrors(form);
       saveDraft.cancel();
       const doSave = async () => {

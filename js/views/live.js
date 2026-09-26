@@ -281,6 +281,15 @@ export function liveCardHtml(db) {
       <div class="live-elapsed" data-tick="elapsed">${fmtElapsed(A.liveElapsedMs(a))}</div>
       <div class="live-elapsed-label">実プレイ時間（休憩を除く）${a.status === 'break' ? `<span class="live-break">休憩 <b data-tick="break">${fmtElapsed(A.liveBreakMs(a))}</b></span>` : A.liveBreakMs(a) > 0 ? `<span class="live-break">休憩計 ${esc(fmtDuration(Math.round(A.liveBreakMs(a) / 60000)))}</span>` : ''}</div>
       ${liveWarningHtml(a)}
+      ${Array.isArray(a.repairs) && a.repairs.length ? `
+        <div class="notice notice-warn live-warn repair-notice" role="alert">
+          ${icons.alert}
+          <div>
+            <b>このセッションの記録を修復しました</b>
+            ${a.repairs.map((m) => `<span>・${esc(m)}</span>`).join('')}
+            <div class="btn-row"><button type="button" class="btn btn-small btn-ghost" data-live="ack-repairs">${icons.check}<span>確認しました</span></button></div>
+          </div>
+        </div>` : ''}
       <div class="live-info">
         <div class="live-info-item"><span class="k">場所</span><span class="v">${esc(a.location)}</span></div>
         <div class="live-info-item"><span class="k">レート</span><span class="v">${esc(fmtStake(a.currency, a.sb, a.bb))}</span></div>
@@ -331,7 +340,9 @@ export function bindLiveCard(root) {
     const a = getDb().active;
     if (!a) return;
     try {
-      if (act === 'cond') {
+      if (act === 'ack-repairs') {
+        await busy(btn, async () => { A.ackLiveRepairs(a.id); });
+      } else if (act === 'cond') {
         const v = Number(btn.dataset.v);
         A.editLive({ condition: a.condition === v ? null : v }, a.id);
       } else if (act === 'pause') await busy(btn, async () => { A.pauseLive(); });

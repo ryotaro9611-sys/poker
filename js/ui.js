@@ -76,9 +76,13 @@ function focusSelector(el) {
   return null;
 }
 
-/** ダイアログを閉じたら、開いたボタン（なければ画面の見出し）へフォーカスを戻す */
-function restoreFocus(prev, key) {
-  let target = prev && prev.isConnected ? prev : key ? document.querySelector(`#view ${key}, ${key}`) : null;
+/**
+ * ダイアログを閉じたら、開いたボタン（再描画で作り直されていれば同じ役割のボタン）へフォーカスを戻す。
+ * 開いている間に別の画面へ移っていたら、今の画面の見出しへ戻す（別の対象のボタンに移さない）。
+ */
+function restoreFocus(prev, key, samePage) {
+  let target = null;
+  if (samePage) target = prev && prev.isConnected ? prev : key ? document.querySelector(`#view ${key}, ${key}`) : null;
   if (!target) {
     target = document.querySelector('#view .page-title, #view .brand');
     if (target && !target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1');
@@ -104,6 +108,7 @@ export function modal({ title, body = '', actions = [], onMount, onAction }) {
     const root = $('#modal-root');
     const prevFocus = document.activeElement;
     const focusKey = focusSelector(prevFocus);
+    const openedAt = location.hash;
     const wrap = document.createElement('div');
     wrap.className = 'modal-backdrop';
     wrap.innerHTML = `
@@ -127,7 +132,7 @@ export function modal({ title, body = '', actions = [], onMount, onAction }) {
           document.body.classList.remove('modal-open');
           setBackgroundInert(false);
         }
-        restoreFocus(prevFocus, focusKey);
+        restoreFocus(prevFocus, focusKey, location.hash === openedAt);
       }, 180);
       resolve(v);
     };

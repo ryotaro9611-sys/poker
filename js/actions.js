@@ -283,7 +283,7 @@ export function editLive(v, expectedId, expectedRev) {
   return withActive((a, db) => {
     if (a.status === 'settling') throw new UserError('精算入力中です。精算画面で修正してください');
     if (v.tripId !== undefined) assertTrip(db, v.tripId);
-    const before = { date: a.date };
+    const before = { location: a.location, currency: a.currency, sb: a.sb, bb: a.bb, tripId: a.tripId, condition: a.condition, date: a.date };
     const now = Date.now();
     if (v.startedAt != null && v.startedAt !== a.startedAt) {
       const first = a.segments[0];
@@ -305,19 +305,25 @@ export function editLive(v, expectedId, expectedRev) {
 
 /**
  * プレイ中に直した情報を、精算の下書きにも反映する（古い下書きで巻き戻さない）。
- * キャッシュアウトなど精算で入れた値はそのまま残す。
+ * 実際に値が変わった項目だけを反映し、精算画面で手で直した値やキャッシュアウトはそのまま残す。
  */
 function syncDraft(a, v, before) {
   const d = a.draft;
   if (!d) return;
-  if (v.location !== undefined) d.location = a.location;
-  if (v.currency !== undefined) d.currency = a.currency;
-  if (v.sb !== undefined) d.sb = fmtInput(a.sb);
-  if (v.bb !== undefined) d.bb = fmtInput(a.bb);
-  if (v.tripId !== undefined) d.tripId = a.tripId || '';
-  if (v.condition !== undefined) d.condition = a.condition == null ? '' : String(a.condition);
+  const changed = (k) => a[k] !== before[k];
+  if (changed('location')) d.location = a.location;
+  if (changed('currency')) d.currency = a.currency;
+  if (changed('sb')) d.sb = fmtInput(a.sb);
+  if (changed('bb')) d.bb = fmtInput(a.bb);
+  if (changed('tripId')) d.tripId = a.tripId || '';
+  if (changed('condition')) d.condition = a.condition == null ? '' : String(a.condition);
   // プレイ日は、下書きで手動で変えていなければ開始時刻の日付に合わせる
-  if (a.date !== before.date && d.date === before.date) d.date = a.date;
+  if (changed('date') && d.date === before.date) d.date = a.date;
+}
+
+/** 読み込み時にタイマーを修復したお知らせを、確認済みにする */
+export function ackLiveRepairs(expectedId) {
+  return withActive((a) => { delete a.repairs; return a; }, expectedId);
 }
 
 /** 終了して精算画面へ（タイマー停止） */
@@ -346,11 +352,18 @@ export function backToPlay(expectedId) {
   }, expectedId);
 }
 
-/** 精算の下書き。画面を開いたときと同じモード・同じセッションにだけ書き込む */
-export function saveLiveDraft(draft, { activeId, gen }) {
+/**
+ * 精算の下書き。画面を開いたときと同じモード・同じセッション・同じ更新番号のときだけ書き込む
+ * （別の画面で変更された後の古い画面の入力で、最新の内容を上書きしない）。
+ * 戻り値：書き込んだら true
+ */
+export function saveLiveDraft(draft, { activeId, gen, rev }) {
   return commit((db) => {
-    if (db.active && db.active.id === activeId) db.active.draft = draft;
-  }, { silent: true, touch: false, gen });
+    const a = db.active;
+    if (!a || a.id !== activeId || (rev != null && (a.rev || 0) !== rev)) return false;
+    a.draft = draft;
+    return true;
+  }, { silent: true, touch: false, gen }) === true;
 }
 
 /** 精算して保存。同じ進行中セッションから二重に保存されない（idで判定） */

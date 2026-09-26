@@ -101,6 +101,13 @@ export function resolvePending({ only } = {}) {
   return start(only, []);
 }
 
+/** 取得処理（まとめた後続分を含む）がすべて終わるまで待つ */
+export async function whenIdle() {
+  while (current || queued) {
+    try { await (queued || current); } catch { /* 結果は問わない */ }
+  }
+}
+
 function start(only, skipKeys) {
   current = run(only, skipKeys).finally(() => {
     current = null;

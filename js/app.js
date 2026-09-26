@@ -97,6 +97,8 @@ function renderChrome(route) {
   }
   if (!store.status.storageOk || store.status.blocked) {
     notices.push(`<div class="banner banner-error"><span>${esc(store.status.notice || '保存領域を利用できません')}</span></div>`);
+  } else if (store.status.repaired) {
+    notices.push(`<div class="banner banner-warn"><span>${esc(store.status.repaired)}</span><button type="button" class="banner-btn" data-banner="dismiss-repaired">閉じる</button></div>`);
   }
   banner.innerHTML = notices.join('');
 
@@ -167,6 +169,7 @@ function boot() {
   document.getElementById('banner').addEventListener('click', (e) => {
     const b = e.target.closest('[data-banner="exit-demo"]');
     if (b) { store.exitDemo(); toast('通常利用に戻りました'); location.hash = '#/'; }
+    if (e.target.closest('[data-banner="dismiss-repaired"]')) { store.dismissRepaired(); if (current) renderChrome(current); }
   });
 
   window.addEventListener('hashchange', () => render());

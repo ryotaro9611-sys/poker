@@ -199,29 +199,63 @@ function checkActive(a, tripIds, ctx) {
   if (!LIVE_STATUSES.includes(a.status)) ctx.fail('状態が不正です');
   if (!CURRENCY_CODES.includes(a.currency) || !checkStake(a)) ctx.fail('通貨・レートが不正です');
   if (!isTime(a.startedAt)) ctx.fail('開始日時が不正です');
+  // 時間・状態・金額の意味が変わる修復は、タイマー自体に残して画面で知らせる（利用者が確認するまで消さない）
+  const repairs = Array.isArray(a.repairs) ? a.repairs.filter((m) => isStr(m, 200)).slice(0, 10) : [];
+  const note = (m) => { if (!repairs.includes(m)) repairs.push(m); };
+
   let segs = a.segments;
   let status = a.status;
   if (!segmentsValid(a)) {
     ({ segs, status } = ctx.soft('タイマーの記録が不正です', repairSegments(a, ctx), 'タイマーの記録を修復しました'));
+    note(status !== a.status
+      ? 'プレイ中の記録が途中で止まっていたため「休憩中」にしました。実プレイ時間を確認してください。'
+      : 'タイマーの記録が壊れていたため修復しました。実プレイ時間を確認してください。');
   }
-  let buyins = Array.isArray(a.buyins) ? a.buyins : [];
-  const okBuyin = (b) => isObj(b) && isAmount(b.amount) && b.amount > 0 && isTime(b.at);
-  if (!Array.isArray(a.buyins) || a.buyins.some((b) => !okBuyin(b))) {
-    buyins = ctx.soft('バイインの記録が不正です', buyins.filter(okBuyin), '不正なバイインの記録を外しました');
+
+  // バイイン：金額が有効なら残す（日時だけ壊れていれば開始時刻にする）。金額が読めないものは外して知らせる
+  let buyins = [];
+  const rawBuyins = Array.isArray(a.buyins) ? a.buyins : null;
+  if (!rawBuyins) ctx.soft('バイインの記録が不正です', null, 'バイインの記録を初期化しました');
+  let unreadable = rawBuyins ? 0 : 1;
+  let undated = 0;
+  for (const b of rawBuyins || []) {
+    if (!isObj(b) || !isAmount(b.amount) || b.amount <= 0) { unreadable++; continue; }
+    if (!isTime(b.at)) undated++;
+    buyins.push({ amount: b.amount, at: isTime(b.at) ? b.at : a.startedAt });
   }
+  if (unreadable && rawBuyins) {
+    ctx.soft('バイインの記録が不正です', null, '金額が読めないバイインの記録を外しました');
+    note(`金額が読めないバイインの記録が${unreadable}件あったため外しました。合計バイインを確認してください。`);
+  } else if (!rawBuyins) {
+    note('バイインの記録が壊れていたため空にしました。合計バイインを確認してください。');
+  }
+  if (undated) {
+    ctx.soft('バイインの日時が不正です', null, 'バイインの日時を開始時刻にしました');
+    note('日時が不明なバイインの記録があったため、開始時刻の記録にしました。');
+  }
+
   let date = a.date;
-  if (!isValidYMD(date)) date = ctx.soft('開始日が不正です', ymdFromDate(new Date(a.startedAt)), '開始日を開始時刻から直しました');
+  if (!isValidYMD(date)) {
+    date = ctx.soft('開始日が不正です', ymdFromDate(new Date(a.startedAt)), '開始日を開始時刻から直しました');
+    note('プレイ日が壊れていたため、開始時刻の日付にしました。プレイ日を確認してください。');
+  }
   let endedAt = isTime(a.endedAt) ? a.endedAt : null;
-  if (status === 'settling' && endedAt == null) endedAt = ctx.soft('終了時刻が不正です', segs[segs.length - 1].e, '終了時刻を直しました');
+  if (status === 'settling' && endedAt == null) {
+    endedAt = ctx.soft('終了時刻が不正です', segs[segs.length - 1].e, '終了時刻を直しました');
+    note('終了時刻が壊れていたため、最後の記録から直しました。実プレイ時間を確認してください。');
+  }
+  const location = checkLocation(a.location, ctx);
+  if (location !== (typeof a.location === 'string' ? a.location.trim() : '')) note(`場所の記録が壊れていたため「${location}」にしました。`);
   return {
     id: a.id, tripId: checkTripRef(a.tripId, tripIds, ctx),
-    location: checkLocation(a.location, ctx), currency: a.currency, sb: a.sb, bb: a.bb, date,
+    location, currency: a.currency, sb: a.sb, bb: a.bb, date,
     tz: isTz(a.tz) ? a.tz : '',
     startedAt: a.startedAt, segments: segs.map((g) => ({ s: g.s, e: g.e ?? null })),
-    status, buyins: buyins.map((b) => ({ amount: b.amount, at: b.at })),
+    status, buyins,
     condition: checkCondition(a.condition, ctx), draft: checkDraft(a.draft, ctx),
     rev: Number.isInteger(a.rev) && a.rev >= 0 ? a.rev : 0,
     ...(endedAt != null ? { endedAt } : {}),
+    ...(repairs.length ? { repairs } : {}),
   };
 }
 
