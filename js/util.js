@@ -194,9 +194,10 @@ export function fmtBBph(n) {
   if (n == null || !Number.isFinite(n)) return '—';
   return signed(n, fmtNum(Math.abs(n), { maxFrac: 2, minFrac: 1 })) + ' bb/時';
 }
+/** 時給。100以上は整数に丸める（「+6,433.33 PHP/時」のように長くなって欄からはみ出さないように） */
 export function fmtHourly(n, cur) {
   if (n == null || !Number.isFinite(n)) return '—';
-  return fmtMoney(n, cur) + '/時';
+  return fmtMoney(Math.abs(n) >= 100 ? Math.round(n) : n, cur) + '/時';
 }
 export function fmtRate(v) {
   if (v == null || !Number.isFinite(v)) return '—';

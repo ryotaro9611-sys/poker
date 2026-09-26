@@ -6,7 +6,7 @@ import {
   sessionProfit, sessionProfitJPY, sessionBB, summarize, tripResult, cumulativeSeries,
   validateSession, validateTrip, groupSummaries, stakeKey, extremes, maxDrawdown, tripMetrics,
 } from '../js/calc.js';
-import { parseNumber, fmtMoney, fmtYen, fmtBBph, addDaysYMD, toInputInTz, fromInputInTz, ymdInTz } from '../js/util.js';
+import { parseNumber, fmtMoney, fmtYen, fmtBBph, fmtHourly, addDaysYMD, toInputInTz, fromInputInTz, ymdInTz } from '../js/util.js';
 
 const empty = () => ({ trips: [], sessions: [], active: null, drafts: {}, prefs: {}, rateCache: {} });
 const db = buildDemoDb(empty);
@@ -120,6 +120,10 @@ t('入力検証', () => {
 });
 
 t('表示形式', () => {
+  assert.equal(fmtHourly(38600 / 6, 'PHP'), '+6,433 PHP/時');
+  assert.equal(fmtHourly(48, 'USD'), '+48 USD/時');
+  assert.equal(fmtHourly(-142.857, 'PHP'), '−143 PHP/時');
+  assert.equal(fmtHourly(12.345, 'USD'), '+12.35 USD/時');
   assert.equal(fmtMoney(240, 'USD'), '+240 USD');
   assert.equal(fmtYen(-21600), '−21,600円');
   assert.equal(fmtYen(0), '±0円');
