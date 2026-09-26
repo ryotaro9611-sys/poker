@@ -15,7 +15,15 @@ export function tripField(db, selected, { hint = '' } = {}) {
       <span class="field-label">遠征</span>
       <select class="input" name="tripId">${tripOptions(db, selected)}</select>
       ${hint ? `<span class="field-hint">${hint}</span>` : ''}
+      <span class="field-error" data-err="tripId"></span>
     </label>`;
+}
+
+/** 選んでいた遠征が削除されていた場合：選択肢を最新にして、遠征欄にエラーを出す */
+export function handleTripMissing(form, db) {
+  const sel = form.querySelector('[name="tripId"]');
+  if (sel) sel.innerHTML = tripOptions(db, '');
+  showErrors(form, { tripId: '選んでいた遠征は削除されました。選び直してください（「遠征なし」も選べます）。' });
 }
 
 export function currencyField(selected) {
@@ -117,7 +125,7 @@ export function conditionField(value, { hint = '' } = {}) {
 
 /** タグ（選択式・複数可） */
 export function tagsField(selected = []) {
-  const set = new Set(selected || []);
+  const set = new Set(Array.isArray(selected) ? selected : []);
   return `
     <fieldset class="field">
       <legend class="field-label">タグ <small class="muted">当てはまるものだけ・任意</small></legend>

@@ -79,6 +79,7 @@ async function getRate(cur, date) {
 }
 
 let current = null;
+let queued = null;
 
 /**
  * 換算待ちのセッションのレートを取得する。
@@ -86,9 +87,22 @@ let current = null;
  */
 export function resolvePending({ only } = {}) {
   if (isDemo()) return Promise.resolve({ skipped: 'demo' });
-  // 取得中に新しい対象（日付の変更など）ができた場合は、終わってからもう一度取りにいく
-  if (current) return current.catch(() => {}).then(() => resolvePending({ only }));
-  current = run(only).finally(() => {
+  // 取得中に呼ばれた分は、終わった後の1回にまとめる（日付の変更などで増えた対象を取りにいく）。
+  // その1回では、直前に失敗した通貨・日付は取り直さない（失敗直後に同じ通信を繰り返さない）
+  if (current) {
+    if (!queued) {
+      queued = current.catch(() => {}).then((prev) => {
+        queued = null;
+        return start(undefined, (prev && prev.failedKeys) || []);
+      });
+    }
+    return queued;
+  }
+  return start(only, []);
+}
+
+function start(only, skipKeys) {
+  current = run(only, skipKeys).finally(() => {
     current = null;
     rateState.running = false;
     rateState.lastRunAt = Date.now();
@@ -97,11 +111,11 @@ export function resolvePending({ only } = {}) {
   return current;
 }
 
-async function run(only) {
+async function run(only, skipKeys = []) {
   const db = getDb();
   const today = todayYMD();
-  const targets = db.sessions.filter((s) => needsRate(s) && s.date <= today && (!only || only.includes(s.id)));
-  if (!targets.length) return { fetched: 0, failed: 0 };
+  const targets = db.sessions.filter((s) => needsRate(s) && s.date <= today && (!only || only.includes(s.id)) && !skipKeys.includes(`${s.currency}|${s.date}`));
+  if (!targets.length) return { fetched: 0, failed: 0, failedKeys: [] };
   if (navigator.onLine === false) {
     rateState.lastError = 'オフラインのため為替を取得できません。接続が戻ると自動で再取得します。';
     notify();
@@ -119,6 +133,7 @@ async function run(only) {
   }
   let fetched = 0;
   let failed = 0;
+  const failedKeys = [];
   for (const g of groups.values()) {
     try {
       const rate = await getRate(g.cur, g.date);
@@ -136,12 +151,13 @@ async function run(only) {
       fetched += g.ids.length;
     } catch (e) {
       failed += g.ids.length;
+      failedKeys.push(`${g.cur}|${g.date}`);
       const msg = e.name === 'SaveError' ? '取得したレートを保存できませんでした' : e.message;
       g.ids.forEach((id) => rateState.errors.set(id, msg));
       rateState.lastError = `一部のレートを取得できませんでした（${msg}）`;
     }
   }
-  return { fetched, failed };
+  return { fetched, failed, failedKeys };
 }
 
 let lastAuto = 0;

@@ -8,12 +8,16 @@ const REMIND_DAYS = 7;
 /** version: 書き出した時点の lastChangeAt（共有中に変更があれば、その変更は未バックアップのまま扱う） */
 function markBackedUp(method, version) {
   const now = Date.now();
-  commit((db) => {
-    db.prefs.lastBackupAt = now;
-    db.prefs.backupVersion = version;
-    db.prefs.lastBackupMethod = method;
-    db.prefs.backupSnoozeUntil = null;
-  }, { touch: false });
+  try {
+    commit((db) => {
+      db.prefs.lastBackupAt = now;
+      db.prefs.backupVersion = version;
+      db.prefs.lastBackupMethod = method;
+      db.prefs.backupSnoozeUntil = null;
+    }, { touch: false });
+  } catch {
+    // ファイルの書き出し自体は済んでいる。日時を記録できないだけなので失敗扱いにしない
+  }
 }
 
 /**

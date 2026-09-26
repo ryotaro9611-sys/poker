@@ -7,7 +7,7 @@ import { backupNow, hasUnbackedChanges } from '../backup.js';
 import { header, icons, toast, showError, confirmDialog, modal, busy } from '../ui.js';
 import { pendingNotice, bindPendingNotice } from './sessions.js';
 
-export const APP_VERSION = '1.2.1';
+export const APP_VERSION = '1.2.2';
 
 export function renderSettings(el) {
   const db = getDb();

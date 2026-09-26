@@ -104,10 +104,10 @@ export function fromInputInTz(value, tz) {
   if (!m) return NaN;
   const naive = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]);
   try {
-    let t = naive - tzOffsetMs(naive, tz);
-    t = naive - tzOffsetMs(t, tz); // 夏時間の境目の補正
-    if (toInputInTz(t, tz) !== m[0]) return NaN; // 存在しない時刻
-    return t;
+    // 前後1日のオフセットを候補にし、同じ現地時刻になるもののうち最も早い時刻を採用する
+    const offsets = new Set([-864e5, 0, 864e5].map((d) => tzOffsetMs(naive + d, tz)));
+    const hits = [...offsets].map((o) => naive - o).filter((t) => toInputInTz(t, tz) === m[0]);
+    return hits.length ? Math.min(...hits) : NaN; // 候補がなければ存在しない時刻
   } catch {
     return new Date(value).getTime();
   }
@@ -130,11 +130,14 @@ export function toHalfWidth(str) {
     .replace(/[\s,、]/g, '');
 }
 
+/** 入力・保存・復元で共通の数値の上限 */
+export const MAX_NUMBER = 1e12;
+
 /**
  * 金額などの文字列を解析。{ ok, value, empty, error }
  * min: 下限, allowEmpty: 空欄を許すか, maxDecimals: 小数桁
  */
-export function parseNumber(raw, { min = 0, allowEmpty = false, maxDecimals = 2, max = 1e12, integer = false } = {}) {
+export function parseNumber(raw, { min = 0, allowEmpty = false, maxDecimals = 2, max = MAX_NUMBER, integer = false } = {}) {
   const s = toHalfWidth(raw);
   if (s === '') return allowEmpty ? { ok: true, value: null, empty: true } : { ok: false, error: '入力してください' };
   if (!/^-?\d*\.?\d*$/.test(s) || s === '.' || s === '-') return { ok: false, error: '数値を入力してください' };

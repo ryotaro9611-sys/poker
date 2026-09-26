@@ -5,7 +5,7 @@ import { parseNumber, esc, fmtElapsed, fmtAmount, fmtStake, fmtTimeInTz, fmtDura
 import { header, icons, toast, showError, busy, confirmDialog, numberDialog } from '../ui.js';
 import {
   tripField, currencyField, textField, amountField, stakeFields, chipsHtml, readForm, showErrors, clearErrors,
-  attachNumberFormatting, unitOf, conditionField, bindConditionClear,
+  attachNumberFormatting, unitOf, conditionField, bindConditionClear, handleTripMissing,
 } from './fields.js';
 import { CONDITIONS, normalizeCondition } from '../tags.js';
 
@@ -81,6 +81,7 @@ export function renderLiveStart(el) {
         toast('タイマーを開始しました', { type: 'success' });
         location.hash = '#/';
       } catch (err) {
+        if (err.code === A.TRIP_MISSING) { handleTripMissing(form, getDb()); showError(err); return; }
         if (err.name === 'UserError' && getDb().active) { location.hash = '#/'; return; }
         showError(err, err.name === 'SaveError' ? () => form.requestSubmit() : null);
       }
@@ -154,6 +155,7 @@ export function renderLiveEdit(el) {
   if (!a) { location.replace('#/'); return; }
   if (a.status === 'settling') { location.replace('#/live/finish'); return; }
   const firstEnd = a.segments[0].e;
+  const baseRev = a.rev || 0;
   const tz = a.tz || currentTz();
   const toLocalInput = (ms) => toInputInTz(ms, tz);
   const otherTz = a.tz && a.tz !== currentTz();
@@ -247,12 +249,15 @@ export function renderLiveEdit(el) {
       // 秒は元の値を保つ（分単位の入力で数十秒ずれないように）
       const startedAt = toLocalInput(a.startedAt) === raw.startedAt ? a.startedAt : t;
       try {
-        A.editLive({ ...v.value, buyin: undefined, startedAt, buyins }, a.id);
+        A.editLive({ ...v.value, buyin: undefined, startedAt, buyins }, a.id, baseRev);
         toast('プレイ中の情報を修正しました', { type: 'success' });
         location.hash = '#/';
       } catch (err) {
         if (err.name === 'UserError' && /開始時刻/.test(err.message)) showErrors(form, { startedAt: err.message });
-        else showError(err);
+        else {
+          if (err.code === A.TRIP_MISSING) handleTripMissing(form, getDb());
+          showError(err);
+        }
       }
     });
   });

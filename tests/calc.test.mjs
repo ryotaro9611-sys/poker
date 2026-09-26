@@ -1,6 +1,7 @@
 // 計算ルールの検証: node tests/calc.test.mjs
 import assert from 'node:assert/strict';
 import { buildDemoDb } from '../js/demo.js';
+import { validateData } from '../js/schema.js';
 import {
   sessionProfit, sessionProfitJPY, sessionBB, summarize, tripResult, cumulativeSeries,
   validateSession, validateTrip, groupSummaries, stakeKey, extremes, maxDrawdown, tripMetrics,
@@ -12,7 +13,10 @@ const db = buildDemoDb(empty);
 const S = db.sessions;
 const close = (a, b, msg) => assert.ok(Math.abs(a - b) < 1e-6, `${msg}: ${a} != ${b}`);
 let n = 0;
-const t = (name, fn) => { fn(); n++; console.log('ok -', name); };
+let failed = 0;
+const t = (name, fn) => {
+  try { fn(); n++; console.log('ok -', name); } catch (e) { failed++; console.log('FAIL -', name, '\n    ', e.message.split('\n')[0]); }
+};
 
 t('4/1 セッション', () => {
   const s = S[0];
@@ -185,4 +189,68 @@ t('冴え・タグの入力検証', () => {
   assert.deepEqual(validateSession({ ...ok, tags: ['tilt', 'unknown', 'loose', 'loose'] }).value.tags, ['loose', 'tilt']);
 });
 
-console.log(`\n${n} tests passed`);
+t('整合性：入力検証を通った値は、保存・再読み込み・復元でも必ず通る', () => {
+  const raws = [
+    { date: '2026-04-01', location: 'A', currency: 'USD', sb: '0', bb: '0.01', hours: '0', mins: '1', buyin: '0', cashout: '0', timeRake: '' },
+    { date: '2026-04-01', location: 'x'.repeat(60), currency: 'KRW', sb: '1000000000000', bb: '1000000000000', hours: '72', mins: '0', buyin: '1000000000000', cashout: '1000000000000', timeRake: '1000000000000', note: 'n'.repeat(500), condition: '5', tags: ['loose', 'tilt'] },
+  ];
+  const trips = [{ id: 't1', name: 'x'.repeat(40), startDate: '2026-04-01', endDate: null, expenses: 1000000000000, note: 'm'.repeat(500), createdAt: 1, updatedAt: 1 }];
+  const sessions = raws.map((raw, i) => {
+    const r = validateSession(raw);
+    assert.equal(r.ok, true, JSON.stringify(r.errors));
+    return { id: `s${i}`, ...r.value, tripId: 't1', rate: { value: 1000000000000, date: raw.date, source: '手入力', manual: true, setAt: new Date().toISOString() }, createdAt: 1, updatedAt: 1 };
+  });
+  const tv = validateTrip({ name: 'x'.repeat(40), startDate: '2026-04-01', endDate: '', expenses: '1000000000000', note: 'm'.repeat(500) });
+  assert.equal(tv.ok, true, JSON.stringify(tv.errors));
+  const res = validateData({ trips, sessions, active: null, drafts: { 'new-session': { ...raws[1], durationEdited: true, savedAt: 1 } }, prefs: {}, rateCache: {} }, { strict: true });
+  assert.deepEqual(res.problems, []);
+  assert.equal(res.data.sessions.length, 2);
+});
+
+t('復元の検証：不正な下書き・プレイ日より後のレートは拒否、読み込みでは項目だけ直す', () => {
+  const base = buildDemoDb(() => ({ trips: [], sessions: [], active: null, drafts: {}, prefs: {}, rateCache: {} }));
+  const withDraft = { ...base, drafts: { 'new-session': { tags: 1 } } };
+  assert.equal(validateData(withDraft, { strict: true }).data, null);
+  const lenientDraft = validateData(withDraft, { strict: false }).data;
+  assert.ok(!('tags' in (lenientDraft.drafts['new-session'] || {})), '壊れたtagsは落とす');
+  const future = JSON.parse(JSON.stringify(base));
+  future.sessions[2].rate.date = '2026-04-05'; // プレイ日 4/4
+  assert.equal(validateData(future, { strict: true }).data, null);
+  assert.equal(validateData(future, { strict: false }).data.sessions[2].rate, null, '換算待ちに戻す');
+  const note = JSON.parse(JSON.stringify(base));
+  note.trips[0].note = 7;
+  const n = validateData(note, { strict: false }).data;
+  assert.equal(n.trips.length, 2, '遠征は残す');
+  assert.equal(n.sessions.filter((s) => s.tripId === 'demo-trip-a').length, 4, '関連記録も残す');
+  const orphan = JSON.parse(JSON.stringify(base));
+  orphan.trips.shift();
+  const o = validateData(orphan, { strict: false }).data;
+  assert.equal(o.sessions.length, 8, '参照切れでも記録は残す');
+  assert.equal(o.sessions[0].tripId, null);
+  assert.equal(validateData(orphan, { strict: true }).data, null, '復元では拒否');
+});
+
+t('読み込み：壊れたタイマーは可能な範囲で修復して残す', () => {
+  const now = Date.now();
+  const active = { id: 'a1', tripId: null, location: 'X', currency: 'USD', sb: 1, bb: 2, date: '2026-09-20', tz: 'Asia/Tokyo', startedAt: now - 3 * 3600e3, status: 'playing', buyins: [], draft: null,
+    segments: [{ s: now - 3 * 3600e3, e: now - 2 * 3600e3 }, { s: now - 3600e3, e: null }, { s: now - 1800e3, e: null }] };
+  const empty = { trips: [], sessions: [], prefs: {}, rateCache: {}, drafts: {} };
+  assert.equal(validateData({ ...empty, active }, { strict: true }).data, null);
+  const a = validateData({ ...empty, active }, { strict: false }).data.active;
+  assert.ok(a, '進行中のタイマーを捨てない');
+  assert.equal(a.segments.filter((g) => g.e == null).length, 1, '終わっていない区間は最後の1つだけ');
+});
+
+t('夏時間：秋の重複時刻はどの地域でも早いほう', () => {
+  const cases = [
+    ['Europe/Berlin', '2026-10-25T02:30', Date.UTC(2026, 9, 25, 0, 30)],
+    ['Europe/London', '2026-10-25T01:30', Date.UTC(2026, 9, 25, 0, 30)],
+    ['Australia/Sydney', '2026-04-05T02:30', Date.UTC(2026, 3, 4, 15, 30)],
+    ['America/Los_Angeles', '2026-11-01T01:30', Date.UTC(2026, 10, 1, 8, 30)],
+  ];
+  for (const [tz, v, expected] of cases) assert.equal(fromInputInTz(v, tz), expected, tz);
+  assert.ok(Number.isNaN(fromInputInTz('2026-03-29T02:30', 'Europe/Berlin')), '春の存在しない時刻');
+});
+
+console.log(`\n${n} tests passed${failed ? `, ${failed} failed` : ''}`);
+if (failed) process.exit(1);

@@ -65,6 +65,27 @@ export function showError(e, retry) {
 
 /* ---------------- ダイアログ ---------------- */
 
+/** 再描画で元のボタンが作り直されても、同じ役割の要素を見つけられるようにする */
+function focusSelector(el) {
+  if (!el || el === document.body || !el.getAttribute) return null;
+  if (el.id) return `#${CSS.escape(el.id)}`;
+  for (const attr of ['data-act', 'data-live', 'data-f', 'data-sort', 'data-scope', 'data-compare']) {
+    const v = el.getAttribute(attr);
+    if (v != null) return `[${attr}="${CSS.escape(v)}"]`;
+  }
+  return null;
+}
+
+/** ダイアログを閉じたら、開いたボタン（なければ画面の見出し）へフォーカスを戻す */
+function restoreFocus(prev, key) {
+  let target = prev && prev.isConnected ? prev : key ? document.querySelector(`#view ${key}, ${key}`) : null;
+  if (!target) {
+    target = document.querySelector('#view .page-title, #view .brand');
+    if (target && !target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1');
+  }
+  if (target && target.focus) try { target.focus({ preventScroll: true }); } catch { /* noop */ }
+}
+
 /** ダイアログ表示中は背面を操作・フォーカスできないようにする */
 function setBackgroundInert(on) {
   for (const id of ['banner', 'view', 'livebar', 'tabbar']) {
@@ -82,6 +103,7 @@ export function modal({ title, body = '', actions = [], onMount, onAction }) {
   return new Promise((resolve) => {
     const root = $('#modal-root');
     const prevFocus = document.activeElement;
+    const focusKey = focusSelector(prevFocus);
     const wrap = document.createElement('div');
     wrap.className = 'modal-backdrop';
     wrap.innerHTML = `
@@ -105,7 +127,7 @@ export function modal({ title, body = '', actions = [], onMount, onAction }) {
           document.body.classList.remove('modal-open');
           setBackgroundInert(false);
         }
-        if (prevFocus && prevFocus.focus) try { prevFocus.focus({ preventScroll: true }); } catch { /* noop */ }
+        restoreFocus(prevFocus, focusKey);
       }, 180);
       resolve(v);
     };

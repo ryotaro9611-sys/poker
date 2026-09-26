@@ -9,7 +9,7 @@ import {
 import { header, toast, showError, busy, confirmDialog, icons } from '../ui.js';
 import {
   tripField, currencyField, textField, amountField, stakeFields, durationField, chipsHtml,
-  readForm, showErrors, clearErrors, attachNumberFormatting, unitOf, conditionField, tagsField, bindConditionClear,
+  readForm, showErrors, clearErrors, attachNumberFormatting, unitOf, conditionField, tagsField, bindConditionClear, handleTripMissing,
 } from './fields.js';
 
 function splitMinutes(m) {
@@ -89,6 +89,7 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
   // この画面が扱う対象（別タブでの変更や、デモ⇔通常の切り替え後に誤って書き込まないため）
   const gen = modeGeneration();
   const activeId = a ? a.id : null;
+  const activeRev = a ? a.rev || 0 : null;
   const baseUpdatedAt = session ? session.updatedAt : null;
 
   const title = mode === 'new' ? '過去のプレイを記録' : mode === 'edit' ? '記録の編集' : '精算して保存';
@@ -319,7 +320,7 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
           location.hash = `#/sessions/${id}`;
           if (rateReset) resolvePending({ only: [id] });
         } else {
-          const s = A.finishLive(r.value, activeId);
+          const s = A.finishLive(r.value, activeId, activeRev);
           toast('セッションを保存しました', { type: 'success' });
           location.hash = `#/sessions/${s.id}`;
           resolvePending({ only: [s.id] });
@@ -329,6 +330,7 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
         await doSave();
       } catch (err) {
         saveDraft();
+        if (err.code === A.TRIP_MISSING) handleTripMissing(form, getDb());
         showError(err, err.name === 'SaveError' ? () => form.requestSubmit() : null);
       }
     });

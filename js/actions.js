@@ -1,6 +1,6 @@
 // データ操作（遠征・セッション・タイマー）。すべて store.commit 経由で原子的に保存する。
 import { commit, getDb, UserError, ConflictError } from './store.js';
-import { uid, todayYMD, ymdFromDate, ymdInTz, currentTz } from './util.js';
+import { uid, todayYMD, ymdFromDate, ymdInTz, currentTz, fmtInput } from './util.js';
 import { MAX_MINUTES } from './calc.js';
 
 /* ---------------- 共通 ---------------- */
@@ -65,6 +65,14 @@ export function recentStakes(db, currency, limit = 4) {
 
 /* ---------------- 遠征 ---------------- */
 
+export const TRIP_MISSING = 'trip-missing';
+/** 選んでいた遠征が別の画面で削除されていないか（参照切れの記録を作らない） */
+function assertTrip(db, tripId) {
+  if (tripId && !db.trips.some((t) => t.id === tripId)) {
+    throw new ConflictError('選んでいた遠征は別の画面（タブ）で削除されました。遠征を選び直してから保存してください。入力内容は残っています。', TRIP_MISSING);
+  }
+}
+
 export function createTrip(v) {
   return commit((db) => {
     const now = Date.now();
@@ -110,6 +118,7 @@ export function deleteTrip(id, mode) {
 
 export function createSession(v, extra = {}) {
   return commit((db) => {
+    assertTrip(db, v.tripId);
     const now = Date.now();
     const s = { id: uid(), ...v, rate: null, ...extra, createdAt: now, updatedAt: now };
     db.sessions.push(s);
@@ -123,6 +132,7 @@ export function updateSession(id, v, baseUpdatedAt) {
     const s = db.sessions.find((x) => x.id === id);
     if (!s) throw new UserError('このセッションは見つかりません（削除された可能性があります）');
     if (baseUpdatedAt != null && s.updatedAt !== baseUpdatedAt) throw new ConflictError(CHANGED_ELSEWHERE);
+    assertTrip(db, v.tripId);
     const rateReset = s.date !== v.date || s.currency !== v.currency;
     Object.assign(s, v, { updatedAt: Date.now() });
     if (rateReset) s.rate = null; // プレイ日・通貨が変わったら、そのプレイ日のレートを取り直す
@@ -189,6 +199,7 @@ export function liveBuyinTotal(a) {
 export function startLive(v) {
   return commit((db) => {
     if (db.active) throw new UserError('すでに進行中のセッションがあります');
+    assertTrip(db, v.tripId);
     const now = Date.now();
     db.active = {
       id: uid(),
@@ -205,6 +216,7 @@ export function startLive(v) {
       buyins: v.buyin > 0 ? [{ amount: v.buyin, at: now }] : [],
       condition: v.condition ?? null,
       draft: null,
+      rev: 0,
     };
     rememberPrefs(db, { ...v, initialBuyin: v.buyin });
     return db.active;
@@ -214,12 +226,22 @@ export function startLive(v) {
 const CHANGED_ELSEWHERE = '別の画面（タブ）でこの内容が先に変更されました。入力内容は残っています。画面を開き直して確認してください。';
 const LIVE_CHANGED = '別の画面（タブ）で、このセッションはすでに保存・破棄されたか、新しいセッションが始まっています。入力内容は残っています。';
 
-/** expectedId を渡すと、画面が扱っているセッションと一致するときだけ変更する */
-function withActive(fn, expectedId) {
+const LIVE_UPDATED = '別の画面（タブ）で、このセッションの内容（再開・バイインなど）が変わりました。入力内容は残っています。画面を開き直してから操作してください。';
+
+/**
+ * 進行中セッションの変更。
+ * expectedId：画面が扱っているセッションと同じときだけ変更する
+ * expectedRev：画面を開いた時点から、別の画面で変更されていないときだけ変更する
+ * 変更のたびに rev（更新番号）を増やす（下書き保存は除く）
+ */
+function withActive(fn, expectedId, expectedRev) {
   return commit((db) => {
     if (!db.active) throw new (expectedId ? ConflictError : UserError)(expectedId ? LIVE_CHANGED : '進行中のセッションはありません');
     if (expectedId && db.active.id !== expectedId) throw new ConflictError(LIVE_CHANGED);
-    return fn(db.active, db);
+    if (expectedRev != null && (db.active.rev || 0) !== expectedRev) throw new ConflictError(LIVE_UPDATED);
+    const r = fn(db.active, db);
+    if (db.active) db.active.rev = (db.active.rev || 0) + 1;
+    return r;
   });
 }
 
@@ -257,9 +279,11 @@ export function removeLastBuyin(expectedId) {
  * プレイ中の情報を修正（場所・通貨・レート・遠征・バイイン内訳・開始時刻）。
  * 開始時刻を変えるとプレイ日もその日付になる（開始の押し忘れ対策）。
  */
-export function editLive(v, expectedId) {
-  return withActive((a) => {
+export function editLive(v, expectedId, expectedRev) {
+  return withActive((a, db) => {
     if (a.status === 'settling') throw new UserError('精算入力中です。精算画面で修正してください');
+    if (v.tripId !== undefined) assertTrip(db, v.tripId);
+    const before = { date: a.date };
     const now = Date.now();
     if (v.startedAt != null && v.startedAt !== a.startedAt) {
       const first = a.segments[0];
@@ -274,8 +298,26 @@ export function editLive(v, expectedId) {
     }
     for (const k of ['location', 'currency', 'sb', 'bb', 'tripId', 'condition']) if (v[k] !== undefined) a[k] = v[k];
     if (Array.isArray(v.buyins)) a.buyins = v.buyins;
+    syncDraft(a, v, before);
     return a;
-  }, expectedId);
+  }, expectedId, expectedRev);
+}
+
+/**
+ * プレイ中に直した情報を、精算の下書きにも反映する（古い下書きで巻き戻さない）。
+ * キャッシュアウトなど精算で入れた値はそのまま残す。
+ */
+function syncDraft(a, v, before) {
+  const d = a.draft;
+  if (!d) return;
+  if (v.location !== undefined) d.location = a.location;
+  if (v.currency !== undefined) d.currency = a.currency;
+  if (v.sb !== undefined) d.sb = fmtInput(a.sb);
+  if (v.bb !== undefined) d.bb = fmtInput(a.bb);
+  if (v.tripId !== undefined) d.tripId = a.tripId || '';
+  if (v.condition !== undefined) d.condition = a.condition == null ? '' : String(a.condition);
+  // プレイ日は、下書きで手動で変えていなければ開始時刻の日付に合わせる
+  if (a.date !== before.date && d.date === before.date) d.date = a.date;
 }
 
 /** 終了して精算画面へ（タイマー停止） */
@@ -295,6 +337,8 @@ export function settleLive() {
 /** 精算をやめてプレイに戻る（タイマー再開） */
 export function backToPlay(expectedId) {
   return withActive((a) => {
+    // すでに別の画面で再開されていれば何もしない（二重に再開しない）
+    if (a.status !== 'settling') return a;
     a.segments.push({ s: Date.now(), e: null });
     a.status = 'playing';
     a.endedAt = null;
@@ -310,13 +354,16 @@ export function saveLiveDraft(draft, { activeId, gen }) {
 }
 
 /** 精算して保存。同じ進行中セッションから二重に保存されない（idで判定） */
-export function finishLive(v, expectedId) {
+export function finishLive(v, expectedId, expectedRev) {
   return commit((db) => {
     const a = db.active;
     if (!a || (expectedId && a.id !== expectedId)) {
       if (expectedId && db.sessions.some((x) => x.id === expectedId)) throw new ConflictError('このセッションは別の画面（タブ）ですでに保存されています。入力内容は残っています。');
       throw new ConflictError(LIVE_CHANGED);
     }
+    // 精算画面を開いた後に、別の画面で再開・変更されていたら保存しない
+    if (a.status !== 'settling' || (expectedRev != null && (a.rev || 0) !== expectedRev)) throw new ConflictError(LIVE_UPDATED);
+    assertTrip(db, v.tripId);
     let s = db.sessions.find((x) => x.id === a.id);
     if (!s) {
       const now = Date.now();

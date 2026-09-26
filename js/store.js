@@ -17,7 +17,7 @@ export class UserError extends Error {
 }
 /** 別の画面・タブで先に変更された（入力内容は残す） */
 export class ConflictError extends UserError {
-  constructor(msg) { super(msg); this.name = 'ConflictError'; }
+  constructor(msg, code = '') { super(msg); this.name = 'ConflictError'; this.code = code; }
 }
 
 export function emptyDb() {
@@ -31,16 +31,27 @@ let demo = false;
 let generation = 0;
 let quarantined = null;
 const listeners = new Set();
-export const status = { storageOk: true, notice: null };
+// blocked: 壊れたデータの退避に失敗したため、元データを上書きしないよう保存を止めている
+export const status = { storageOk: true, notice: null, blocked: false };
 
 /** 端末内データの読み込み：不正な記録は除外し、元データは消さずに別キーへ退避する */
 function normalize(d, raw) {
   const { data, problems } = validateData(d, { strict: false });
-  if (!problems.length) return data;
+  if (!problems.length) {
+    status.blocked = false;
+    return data;
+  }
   if (quarantined !== raw) {
-    quarantined = raw;
-    try { localStorage.setItem(`${KEY}:corrupt:${Date.now()}`, raw); } catch { /* noop */ }
-    status.notice = `保存データの一部（${problems.length}件）が壊れていたため除外して開きました。元のデータは端末内に退避しています。（${problems[0]}）`;
+    try {
+      localStorage.setItem(`${KEY}:corrupt:${Date.now()}`, raw);
+      quarantined = raw; // 退避できたときだけ処理済みにする
+      status.blocked = false;
+      status.notice = `保存データの一部に不正な値があったため、直して開きました（${problems.length}件：${problems[0]}）。元のデータは端末内に退避しています。`;
+    } catch {
+      // 退避できない間は、元データを直したデータで上書きしない
+      status.blocked = true;
+      status.notice = `保存データの一部に不正な値がありますが、元のデータを退避できなかったため、保存を止めています（空き容量不足の可能性）。表示中の内容はそのままバックアップできます。容量を空けてからアプリを開き直してください。（${problems[0]}）`;
+    }
   }
   return data || emptyDb();
 }
@@ -139,6 +150,9 @@ export function commit(mutator, { silent = false, touch = !silent, gen = null } 
     return result;
   }
   const base = readReal();
+  // 読み直した最新の内容を手元にも反映する（保存が止まっても、画面は最新の状態で判断できる）
+  real = base;
+  if (status.blocked) throw new UserError(status.notice);
   const next = clone(base);
   // バックアップ後に変更があったかを判断するため、記録の変更時刻を残す（下書き保存などは除く）
   if (touch) next.lastChangeAt = Date.now();

@@ -71,14 +71,20 @@ function addDays(ymd, n) {
   const [y, mo, d] = ymd.split('-').map(Number);
   return new Date(Date.UTC(y, mo - 1, d + n)).toISOString().slice(0, 10);
 }
+const harnessErrors = [];
+// ページの再読み込み等で保留中の要求が消えるのは想定内。それ以外は記録してテストを失敗させる
+function cdpSettle(p) {
+  return p.catch((e) => { if (!/Invalid InterceptionId|No resource with given id/i.test(e.message)) harnessErrors.push(e.message); });
+}
+process.on('unhandledRejection', (e) => { harnessErrors.push(`未処理のPromise: ${e && e.message ? e.message : e}`); });
 function fulfillJson(requestId, obj) {
-  send('Fetch.fulfillRequest', {
+  return cdpSettle(send('Fetch.fulfillRequest', {
     requestId, responseCode: 200,
     responseHeaders: [{ name: 'Content-Type', value: 'application/json' }, { name: 'Access-Control-Allow-Origin', value: '*' }],
     body: Buffer.from(JSON.stringify(obj)).toString('base64'),
-  });
+  }));
 }
-const failReq = (requestId) => send('Fetch.failRequest', { requestId, errorReason: 'InternetDisconnected' });
+const failReq = (requestId) => cdpSettle(send('Fetch.failRequest', { requestId, errorReason: 'InternetDisconnected' }));
 function answerRate({ requestId, request }, mode) {
   const url = new URL(request.url);
   if (mode === 'fail') return failReq(requestId);
@@ -359,7 +365,7 @@ test('プレイ中の修正：端末と違うタイムゾーンで始めた記�
   await go('#/live/edit');
   await waitFor(`document.querySelector('[name=startedAt]')`);
   includes(await text('.field-label'), 'America/Los_Angeles の時刻');
-  const shown = await ev(`import('./js/util.js').then((u) => [u.toInputInTz(${s0}, 'America/Los_Angeles'), u.toInputInTz(${target}, 'America/Los_Angeles'), u.ymdInTz(${target}, 'America/Los_Angeles')])`);
+  const shown = [inputInTz(s0, 'America/Los_Angeles'), inputInTz(target, 'America/Los_Angeles'), inputInTz(target, 'America/Los_Angeles').slice(0, 10)];
   assert((await ev(`document.querySelector('[name=startedAt]').value`)) === shown[0], '開始時刻は記録したタイムゾーンで表示');
   await setVal('[name=startedAt]', shown[1]);
   await click('[data-act=save]');
@@ -604,6 +610,13 @@ test('オフライン：一度読み込めば、通信なしで起動・記録�
 
 /* ---------- レビュー指摘の回帰テスト ---------- */
 
+/** 期待値の検算用（アプリの実装とは別に、Node の Intl で現地時刻の文字列を作る） */
+function inputInTz(ms, tz) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+    .formatToParts(new Date(ms)).map((x) => [x.type, x.value]));
+  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`;
+}
+
 const baseSession = { id: 's1', tripId: null, date: '2026-09-01', location: 'A', currency: 'JPY', sb: 1, bb: 2, buyin: 100, cashout: 300, timeRake: 0, minutes: 60, rate: null };
 async function importFile(obj) {
   await go('#/settings');
@@ -623,6 +636,8 @@ test('復元：不正なバックアップは取り込まず、今のデータ�
     { trips: [], sessions: [{ ...baseSession, tripId: 'missing' }] },
     { trips: [], sessions: [baseSession, baseSession] },
     { trips: [], sessions: [baseSession], active: { id: 'x', status: '"><b>', segments: [] } },
+    { trips: [], sessions: [baseSession], drafts: { 'new-session': { tags: 1 } } },
+    { trips: [], sessions: [{ ...baseSession, currency: 'USD', rate: { value: 150, date: '2026-09-02', source: 'x', manual: false } }] },
   ];
   for (const b of bad) {
     await importFile({ data: b });
@@ -826,6 +841,139 @@ test('プレイ中の修正：夏時間の切り替えで存在しない時刻�
   assert((await data()).active.startedAt === now - 3600e3, '開始時刻は変わらない');
 });
 
+/* ---------- 2回目のレビュー指摘の回帰テスト ---------- */
+
+const liveSettling = (over = {}) => {
+  const now = Date.now();
+  return { id: 'S', tripId: null, location: 'Same', currency: 'USD', sb: 1, bb: 2, date: '2026-09-20', tz: 'Asia/Tokyo', startedAt: now - 2 * 3600e3, segments: [{ s: now - 2 * 3600e3, e: now - 60e3 }], status: 'settling', endedAt: now - 60e3, buyins: [{ amount: 100, at: now - 2 * 3600e3 }], draft: null, ...over };
+};
+
+test('同じセッションを2画面で操作：古い精算画面から二重に再開・古い内容で保存しない', async () => {
+  await fresh();
+  await seed({ active: liveSettling() });
+  await go('#/live/finish');
+  await waitFor(`document.querySelector('[name=cashout]')`);
+  await setVal('[name=cashout]', '300');
+  // 別タブでプレイを再開し、900を追加バイイン
+  await ev(`(() => { const d = JSON.parse(localStorage.getItem('tripledger:data:v1')); const a = d.active; a.status = 'playing'; a.endedAt = null; a.segments.push({ s: Date.now(), e: null }); a.buyins.push({ amount: 900, at: Date.now() }); a.rev = (a.rev || 0) + 1; localStorage.setItem('tripledger:data:v1', JSON.stringify(d)); })()`);
+  await click('[data-act=save]');
+  await waitFor(`document.querySelector('.toast-error')`, 3000, '競合の通知');
+  includes(await text('.toast-error'), '別の画面');
+  let d = await data();
+  assert(d.sessions.length === 0 && d.active && d.active.buyins.length === 2, '古い内容で保存しない');
+  assert((await ev(`document.querySelector('[name=cashout]').value`)) === '300', '入力は残る');
+  await click('[data-act=back-to-play]');
+  await waitFor(`location.hash === '#/'`);
+  d = await data();
+  assert(d.active.segments.filter((g) => g.e == null).length === 1, '二重に再開しない');
+  await reload();
+  assert(await ev(`!!document.querySelector('.live-card')`), '再読み込み後もタイマーが残る');
+});
+
+test('入力中に選んでいた遠征が別画面で削除されたら、保存を止めて選び直してもらう', async () => {
+  await fresh();
+  await seed({ trips: [{ id: 't1', name: 'Gone', startDate: '2026-04-01', endDate: null, expenses: null }] });
+  await go('#/sessions/new?trip=t1');
+  await waitFor(`document.querySelector('[name=tripId]')?.value === 't1'`);
+  await setVal('[name=location]', 'L'); await setVal('[name=sb]', '1'); await setVal('[name=bb]', '2');
+  await setVal('[name=hours]', '1'); await setVal('[name=buyin]', '100'); await setVal('[name=cashout]', '150');
+  await ev(`(() => { const d = JSON.parse(localStorage.getItem('tripledger:data:v1')); d.trips = []; localStorage.setItem('tripledger:data:v1', JSON.stringify(d)); })()`);
+  await click('[data-act=save]');
+  await waitFor(`document.querySelector('[data-err=tripId]')?.textContent`, 3000, '遠征欄のエラー');
+  assert((await data()).sessions.length === 0, '参照切れの記録を作らない');
+  assert(!(await ev(`!![...document.querySelectorAll('[name=tripId] option')].find((o) => o.value === 't1')`)), '削除された遠征は選択肢から消える');
+  await click('[data-act=save]');
+  await waitFor(`/^#\\/sessions\\/[^/n]/.test(location.hash)`, 3000, '選び直して保存');
+  await reload();
+  const d = await data();
+  assert(d.sessions.length === 1 && d.sessions[0].tripId === null, '再読み込み後も記録が残る');
+});
+
+test('元データの退避に失敗したら、上書き保存を止めて知らせる', async () => {
+  await fresh();
+  const script = await send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => { const o = Storage.prototype.setItem; Storage.prototype.setItem = function (k, v) { if (String(k).includes(':corrupt:')) throw new DOMException('quota', 'QuotaExceededError'); return o.call(this, k, v); }; })()` });
+  try {
+    await seed({ trips: [{ id: 't1', name: 'T', startDate: '2026-04-01', endDate: null, expenses: null, note: 7 }], sessions: [{ ...baseSession, tripId: 't1' }] });
+    const raw = await ev(`localStorage.getItem('tripledger:data:v1')`);
+    includes(await text('#banner'), '退避できなかった', 'バナー');
+    await go('#/trips/new');
+    await setVal('[name=name]', 'New');
+    await click('[data-act=save]');
+    await waitFor(`document.querySelector('.toast-error')`, 3000, '保存を止める');
+    assert(await ev(`localStorage.getItem('tripledger:data:v1')`) === raw, '元データは上書きしない');
+  } finally {
+    await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: script.identifier });
+  }
+  await reload();
+  assert(await ev(`Object.keys(localStorage).some((k) => k.includes(':corrupt:'))`), '次の起動で退避できる');
+  assert(!(await ev(`!!document.querySelector('.banner-error')`)), '退避できたら保存を再開');
+  await go('#/trips/new');
+  await setVal('[name=name]', 'After');
+  await click('[data-act=save]');
+  await waitFor(`/^#\\/trips\\/[^/n]/.test(location.hash)`, 3000, '保存できる');
+  const d = await data();
+  const t1 = d.trips.find((t) => t.id === 't1');
+  assert(d.trips.length === 2 && d.sessions.length === 1 && t1 && t1.note === '', '記録は残し、壊れたメモだけ空にする');
+});
+
+test('精算→プレイに戻る→情報を修正→再精算で、古い下書きが修正を巻き戻さない', async () => {
+  await fresh();
+  await seed({ active: liveSettling() });
+  await go('#/live/finish');
+  await waitFor(`document.querySelector('[name=cashout]')`);
+  await setVal('[name=cashout]', '555');
+  await click('[data-act=back-to-play]');
+  await waitFor(`location.hash === '#/'`);
+  await click('.live-edit');
+  await waitFor(`document.querySelector('[name=startedAt]')`);
+  await setVal('[name=location]', 'NewLoc');
+  await setVal('[name=sb]', '5'); await setVal('[name=bb]', '10');
+  await click('[data-act=save]');
+  await waitFor(`location.hash === '#/'`);
+  await click('[data-live=finish]');
+  await waitFor(`document.querySelector('[name=cashout]')`);
+  const v = await ev(`({ loc: document.querySelector('[name=location]').value, bb: document.querySelector('[name=bb]').value, cash: document.querySelector('[name=cashout]').value })`);
+  assert(v.loc === 'NewLoc' && v.bb === '10', `修正した内容が出る（${JSON.stringify(v)}）`);
+  assert(v.cash === '555', '精算で入れた金額は残る');
+});
+
+test('ダイアログで保存した後、開いたボタンにフォーカスが戻る', async () => {
+  await fresh();
+  await seed({ trips: [{ id: 't1', name: 'T', startDate: '2026-04-01', endDate: null, expenses: 100 }] });
+  await go('#/trips/t1');
+  await ev(`(() => { const b = document.querySelector('[data-act=expenses]'); b.focus(); b.click(); })()`);
+  await waitFor(`document.querySelector('.modal input')`);
+  await setVal('.modal input', '500');
+  await modalPrimary();
+  await waitFor(`!document.querySelector('.modal-backdrop')`);
+  await sleep(100);
+  assert((await ev(`document.activeElement?.dataset?.act`)) === 'expenses', `フォーカス先: ${await ev('document.activeElement?.tagName')}`);
+});
+
+test('為替：取得中に何度呼ばれても、同じ日付の取得を重複させない', async () => {
+  await fresh();
+  rateMode = 'hold';
+  await manualSession({ date: '2026-04-04' });
+  await waitFor(`true`);
+  await sleep(200);
+  const before = rateRequests.length;
+  await ev(`import('./js/rates.js').then((m) => { for (let i = 0; i < 5; i++) m.resolvePending(); return 1; })`);
+  rateMode = 'fail';
+  releaseHeld('fail');
+  await sleep(1500);
+  const n = rateRequests.length - before;
+  assert(n <= 2, `通信回数 ${n + 1}回（Frankfurter 1回＋予備 1回まで）`);
+  rateMode = 'ok';
+});
+
+test('端末内の下書きが壊れていても、入力画面を開ける', async () => {
+  await fresh();
+  await seed({ drafts: { 'new-session': { tags: 1, location: 5, cashout: '12' } } });
+  await go('#/sessions/new');
+  await waitFor(`document.querySelector('[name=cashout]')`, 3000, '入力画面');
+  assert((await ev(`document.querySelector('[name=cashout]').value`)) === '12', '正常な項目は復元');
+});
+
 test('画面幅：375px・430px で横にはみ出さない', async () => {
   await fresh();
   await ev(`sessionStorage.setItem('tripledger:demo', '1')`);
@@ -857,20 +1005,27 @@ await send('Page.navigate', { url: BASE });
 await waitFor(`document.documentElement.classList.contains('ready')`, 10000, '初回起動');
 
 let failed = 0;
-for (const t of tests) {
+// 例：TEST_FILTER=退避 node tests/e2e.mjs（名前に含まれる文字で絞り込み）
+const selected = process.env.TEST_FILTER ? tests.filter((t) => t.name.includes(process.env.TEST_FILTER)) : tests;
+try {
+for (const t of selected) {
   const errBefore = jsErrors.length;
+  const harnessBefore = harnessErrors.length;
   try {
     await t.fn();
     if (jsErrors.length > errBefore) throw new Error(`画面でJSエラー: ${jsErrors.slice(errBefore).join(' / ')}`);
+    if (harnessErrors.length > harnessBefore) throw new Error(`テスト基盤のエラー: ${harnessErrors.slice(harnessBefore).join(' / ')}`);
     console.log(`ok   - ${t.name}`);
   } catch (e) {
     failed++;
     console.log(`FAIL - ${t.name}\n       ${String(e.message).split('\n').join('\n       ')}`);
   }
 }
-console.log(`\n${tests.length - failed}/${tests.length} passed`);
-ws.close();
-chrome.kill();
-server.close();
-try { fs.rmSync(profile, { recursive: true, force: true }); } catch { /* noop */ }
+console.log(`\n${selected.length - failed}/${selected.length} passed`);
+} finally {
+  try { ws.close(); } catch { /* noop */ }
+  chrome.kill();
+  server.close();
+  try { fs.rmSync(profile, { recursive: true, force: true }); } catch { /* noop */ }
+}
 process.exit(failed ? 1 : 0);
