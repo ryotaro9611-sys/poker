@@ -60,6 +60,13 @@ function initialValues(db, mode, { session, active, presetTrip }) {
 }
 
 let formCleanup = null;
+/**
+ * ルーターに渡す後処理。画面を作り直しても（再試行・下書きの破棄）、常に「今表示している画面」の後処理を呼ぶ。
+ * これで、画面を離れる直前の入力の確定が抜けない。
+ */
+function cleanupFormView() {
+  if (formCleanup) { formCleanup(); formCleanup = null; }
+}
 
 export function renderSessionForm(el, { mode, id, presetTrip }) {
   if (formCleanup) { formCleanup(); formCleanup = null; }
@@ -87,10 +94,10 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
           <a class="btn btn-ghost btn-block" href="#/">ホームに戻る（タイマーはそのまま）</a>
         </div>`;
       el.querySelector('[data-act="retry-settle"]').addEventListener('click', () => renderSessionForm(el, { mode, id, presetTrip }));
-      return undefined;
+      return cleanupFormView;
     }
     if (getDb().active && getDb().active.status === 'settling') return renderSessionForm(el, { mode, id, presetTrip });
-    return undefined;
+    return cleanupFormView;
   }
 
   const draftKey = mode === 'edit' ? `edit:${id}` : 'new-session';
@@ -380,5 +387,5 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
   // 画面を離れる・アプリが裏に回る・再読み込みの直前に、未保存の入力を確定する
   const offLeave = onLeave(() => saveDraft.flush());
   formCleanup = () => { saveDraft.flush(); offLeave(); };
-  return formCleanup;
+  return cleanupFormView;
 }

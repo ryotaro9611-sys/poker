@@ -268,5 +268,19 @@ t('夏時間：秋の重複時刻はどの地域でも早いほう', () => {
   assert.ok(Number.isNaN(fromInputInTz('2026-03-29T02:30', 'Europe/Berlin')), '春の存在しない時刻');
 });
 
+t('R2・R3：壊れたプレイ日は開始地の日付で直す／不正な修復履歴は復元で拒否', () => {
+  const empty = { trips: [], sessions: [], prefs: {}, rateCache: {}, drafts: {} };
+  const start = Date.parse('2026-09-26T06:30:00Z'); // ロサンゼルスでは 9/25 23:30、東京では 9/26
+  const active = { id: 'a1', tripId: null, location: 'LA', currency: 'USD', sb: 1, bb: 2, date: 'broken', tz: 'America/Los_Angeles', startedAt: start, segments: [{ s: start, e: null }], status: 'playing', buyins: [], draft: null };
+  assert.equal(validateData({ ...empty, active }, { strict: false }).data.active.date, '2026-09-25');
+  const okActive = { ...active, date: '2026-09-25' };
+  assert.equal(validateData({ ...empty, active: { ...okActive, repairs: 123 } }, { strict: true }).data, null, '型が不正なら拒否');
+  assert.equal(validateData({ ...empty, active: { ...okActive, repairs: ['ok', 5] } }, { strict: true }).data, null, '要素が不正なら拒否');
+  assert.ok(validateData({ ...empty, active: { ...okActive, repairs: ['確認してください'] } }, { strict: true }).data, '正しい修復履歴は受け入れる');
+  const len = validateData({ ...empty, active: { ...okActive, repairs: ['ok', 5] } }, { strict: false });
+  assert.deepEqual(len.data.active.repairs, ['ok'], '読み込みでは不正な要素だけ外す');
+  assert.ok(len.problems.length >= 1, '外したことを記録する');
+});
+
 console.log(`\n${n} tests passed${failed ? `, ${failed} failed` : ''}`);
 if (failed) process.exit(1);

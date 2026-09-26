@@ -14,11 +14,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /* ---------- 静的サーバー ---------- */
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.svg': 'image/svg+xml', '.webmanifest': 'application/manifest+json', '.json': 'application/json' };
+// 更新のテスト用：swVersion を入れると、その版名の sw.js を返す（新しい版の公開を再現）
+let swVersion = null;
 const server = http.createServer((req, res) => {
   const p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
   const file = path.join(ROOT, p.endsWith('/') ? p + 'index.html' : p);
   if (!file.startsWith(ROOT) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); res.end(); return; }
   res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-store' });
+  if (p === '/sw.js' && swVersion) {
+    res.end(fs.readFileSync(file, 'utf8').replace(/const VERSION = '[^']+';/, `const VERSION = '${swVersion}';`));
+    return;
+  }
   fs.createReadStream(file).pipe(res);
 });
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -131,8 +137,10 @@ const text = (sel = '#view') => ev(`(document.querySelector(${q(sel)})?.innerTex
 const data = () => ev(`JSON.parse(localStorage.getItem('tripledger:data:v1') || 'null')`);
 const go = async (hash) => { await ev(`location.hash = ${q(hash)}`); await sleep(120); };
 async function reload() {
+  // 古いページの「起動完了」を見て先へ進まないよう、目印を付けてから再読み込みし、新しいページの起動を待つ
+  await ev(`window.__beforeReload = true`);
   await send('Page.reload');
-  await waitFor(`document.documentElement.classList.contains('ready')`, 8000, '起動');
+  await waitFor(`!window.__beforeReload && document.documentElement.classList.contains('ready')`, 8000, '起動');
 }
 async function fresh() {
   await ev(`localStorage.clear(); sessionStorage.clear(); location.hash = '#/'`);
@@ -572,6 +580,44 @@ test('バックアップ：お知らせ、共有シートで保存、あとで�
   await waitFor(`document.querySelector('.modal .btn-danger')`);
   await click('.modal .btn-danger');
   await waitFor(`JSON.parse(localStorage.getItem('tripledger:data:v1')).sessions[0]?.location === 'Restored'`);
+});
+
+test('初回訪問：オフライン用の準備が終わっても、勝手に再読み込みしない', async () => {
+  await fresh();
+  // オフライン用の準備を消して「初めて開いた」状態にする
+  await ev(`navigator.serviceWorker.getRegistrations().then((rs) => Promise.all(rs.map((r) => r.unregister()))).then(() => caches.keys()).then((ks) => Promise.all(ks.map((k) => caches.delete(k)))).then(() => 1)`);
+  const counter = await send('Page.addScriptToEvaluateOnNewDocument', { source: `sessionStorage.setItem('__loads', String(Number(sessionStorage.getItem('__loads') || 0) + 1))` });
+  try {
+    await ev(`sessionStorage.removeItem('__loads')`);
+    await reload();
+    assert(!(await ev('!!navigator.serviceWorker.controller')), '初回訪問の状態');
+    await waitFor(`navigator.serviceWorker.getRegistration().then((r) => !!(r && r.active))`, 10000, '準備の完了');
+    await sleep(1500);
+    const loads = await ev(`Number(sessionStorage.getItem('__loads'))`);
+    assert(loads === 1, `読み込み回数 ${loads}回（勝手に再読み込みしない）`);
+  } finally {
+    await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: counter.identifier });
+  }
+});
+
+test('更新：新しい版が出たら知らせ、「更新」で切り替わる（初回訪問のページでも・記録はそのまま）', async () => {
+  await fresh();
+  await seed({ sessions: [baseSession] });
+  // 初めて開いた状態（オフライン用の準備なし）から始める
+  await ev(`navigator.serviceWorker.getRegistrations().then((rs) => Promise.all(rs.map((r) => r.unregister()))).then(() => caches.keys()).then((ks) => Promise.all(ks.map((k) => caches.delete(k)))).then(() => 1)`);
+  await reload();
+  await waitFor(`navigator.serviceWorker.getRegistration().then((r) => !!(r && r.active) && !!navigator.serviceWorker.controller)`, 10000, '準備の完了');
+  try {
+    swVersion = 'v-test-next';
+    await ev(`window.__oldPage = true; navigator.serviceWorker.getRegistration().then((r) => r.update()).then(() => 1)`);
+    await waitFor(`document.querySelector('.toast')?.innerText.includes('新しいバージョン')`, 10000, '更新のお知らせ');
+    await click('.toast-action');
+    await waitFor(`!window.__oldPage && document.documentElement.classList.contains('ready')`, 10000, '新しい版で読み込み直す');
+    await waitFor(`caches.keys().then((k) => k.length === 1 && k[0] === 'tripledger-v-test-next')`, 5000, '古いキャッシュの削除');
+    assert((await data()).sessions.length === 1, '記録はそのまま');
+  } finally {
+    swVersion = null;
+  }
 });
 
 test('オフライン：一度読み込めば、通信なしで起動・記録・閲覧できる', async () => {
@@ -1102,6 +1148,26 @@ test('N8：ダイアログを開いたまま別の画面へ移ったら、別の
   await sleep(100);
   assert((await ev(`document.activeElement?.dataset?.act`)) !== 'expenses', 'Bの経費ボタンにフォーカスしない');
   assert(await ev(`document.activeElement?.classList.contains('page-title')`), '画面の見出しに戻す');
+});
+
+/* ---------- 4回目のレビュー指摘の回帰テスト ---------- */
+
+test('R1：保存失敗から「もう一度試す」で開いた精算画面でも、離れる直前の入力を確定する', async () => {
+  await fresh();
+  const now = Date.now();
+  await seed({ active: { id: 'r1', tripId: null, location: 'R', currency: 'USD', sb: 1, bb: 2, date: '2026-09-20', tz: 'Asia/Tokyo', startedAt: now - 3600e3, segments: [{ s: now - 3600e3, e: null }], status: 'playing', buyins: [], draft: null, rev: 0 } });
+  await ev(`window.__o = Storage.prototype.setItem; Storage.prototype.setItem = function () { throw new DOMException('quota', 'QuotaExceededError'); }`);
+  await go('#/live/finish');
+  await waitFor(`document.querySelector('[data-act=retry-settle]')`, 3000, '失敗の案内');
+  await ev(`Storage.prototype.setItem = window.__o`);
+  await click('[data-act=retry-settle]');
+  await waitFor(`document.querySelector('[name=cashout]')`, 3000, '再試行で精算画面');
+  await setVal('[name=cashout]', '321');
+  await ev(`location.hash = '#/'`); // 自動保存（350ms）より前に離れる
+  // 別タブで同じタイマーを再開した状態
+  await ev(`(() => { const d = JSON.parse(localStorage.getItem('tripledger:data:v1')); const a = d.active; a.status = 'playing'; a.endedAt = null; a.segments.push({ s: Date.now(), e: null }); a.rev = (a.rev || 0) + 1; localStorage.setItem('tripledger:data:v1', JSON.stringify(d)); })()`);
+  await sleep(600);
+  assert((await data()).active.draft?.cashout === '321', `離れる直前の入力を確定（${JSON.stringify((await data()).active.draft)}）`);
 });
 
 test('画面幅：375px・430px で横にはみ出さない', async () => {

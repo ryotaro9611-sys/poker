@@ -3,7 +3,7 @@
 // ・端末内データの読み込み（寛容）：収支そのもの（日付・通貨・金額・時間・レート）が壊れた記録だけ除外し、
 //   メモ・冴え・タグ・遠征の参照・為替などの付随項目は、その項目だけ初期化して記録を残す
 // 入力画面の検証（calc.js / util.js）と同じ上限を使い、アプリ自身が保存した値を拒否しないようにする。
-import { CURRENCY_CODES, isValidYMD, ymdFromDate, MAX_NUMBER } from './util.js';
+import { CURRENCY_CODES, isValidYMD, ymdFromDate, ymdInTz, MAX_NUMBER } from './util.js';
 import { MAX_MINUTES } from './calc.js';
 import { normalizeCondition, TAG_IDS } from './tags.js';
 
@@ -200,7 +200,13 @@ function checkActive(a, tripIds, ctx) {
   if (!CURRENCY_CODES.includes(a.currency) || !checkStake(a)) ctx.fail('通貨・レートが不正です');
   if (!isTime(a.startedAt)) ctx.fail('開始日時が不正です');
   // 時間・状態・金額の意味が変わる修復は、タイマー自体に残して画面で知らせる（利用者が確認するまで消さない）
-  const repairs = Array.isArray(a.repairs) ? a.repairs.filter((m) => isStr(m, 200)).slice(0, 10) : [];
+  let repairs = [];
+  if (a.repairs != null) {
+    const okRepair = (m) => isStr(m, 200) && m.length > 0;
+    if (!Array.isArray(a.repairs) || a.repairs.length > 10 || !a.repairs.every(okRepair)) {
+      repairs = ctx.soft('修復履歴が不正です', Array.isArray(a.repairs) ? a.repairs.filter(okRepair).slice(0, 10) : [], '修復履歴の不正な項目を外しました');
+    } else repairs = [...a.repairs];
+  }
   const note = (m) => { if (!repairs.includes(m)) repairs.push(m); };
 
   let segs = a.segments;
@@ -236,7 +242,9 @@ function checkActive(a, tripIds, ctx) {
 
   let date = a.date;
   if (!isValidYMD(date)) {
-    date = ctx.soft('開始日が不正です', ymdFromDate(new Date(a.startedAt)), '開始日を開始時刻から直しました');
+    // 記録したタイムゾーン（開始地）が分かれば、その土地の日付で直す（帰国後の端末のタイムゾーンは使わない）
+    const tz = isTz(a.tz) && a.tz ? a.tz : null;
+    date = ctx.soft('開始日が不正です', tz ? ymdInTz(a.startedAt, tz) : ymdFromDate(new Date(a.startedAt)), '開始日を開始時刻から直しました');
     note('プレイ日が壊れていたため、開始時刻の日付にしました。プレイ日を確認してください。');
   }
   let endedAt = isTime(a.endedAt) ? a.endedAt : null;

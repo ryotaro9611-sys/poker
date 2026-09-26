@@ -136,9 +136,10 @@ function rerenderIfLive() {
 function registerSW() {
   if (!('serviceWorker' in navigator)) return;
   if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') return;
+  let updateRequested = false;
   navigator.serviceWorker.register('./sw.js').then((reg) => {
     const promptUpdate = (w) => {
-      toast('新しいバージョンがあります', { action: { label: '更新', fn: () => w.postMessage('SKIP_WAITING') }, duration: 15000 });
+      toast('新しいバージョンがあります', { action: { label: '更新', fn: () => { updateRequested = true; w.postMessage('SKIP_WAITING'); } }, duration: 15000 });
     };
     if (reg.waiting && navigator.serviceWorker.controller) promptUpdate(reg.waiting);
     reg.addEventListener('updatefound', () => {
@@ -150,9 +151,12 @@ function registerSW() {
     });
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update().catch(() => {}); });
   }).catch((e) => console.warn('SW登録に失敗', e));
+  // 新しい版に切り替わったとき（この画面か別のタブで「更新」を押した）だけ読み込み直す。
+  // 初めて開いたときにオフライン用の準備が整った場合にも同じ合図が来るが、そのときは読み込み直さない
+  const hadController = !!navigator.serviceWorker.controller;
   let reloading = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (reloading) return;
+    if (!(hadController || updateRequested) || reloading) return;
     reloading = true;
     location.reload();
   });
