@@ -5,10 +5,12 @@ import { todayYMD, ymdFromDate } from './util.js';
 const SNOOZE_DAYS = 3;
 const REMIND_DAYS = 7;
 
-function markBackedUp(method) {
+/** version: 書き出した時点の lastChangeAt（共有中に変更があれば、その変更は未バックアップのまま扱う） */
+function markBackedUp(method, version) {
   const now = Date.now();
   commit((db) => {
     db.prefs.lastBackupAt = now;
+    db.prefs.backupVersion = version;
     db.prefs.lastBackupMethod = method;
     db.prefs.backupSnoozeUntil = null;
   }, { touch: false });
@@ -20,6 +22,7 @@ function markBackedUp(method) {
  */
 export async function backupNow() {
   if (isDemo()) throw new UserError('デモ中はバックアップできません。通常モードに戻ってから操作してください');
+  const version = getDb().lastChangeAt ?? 0;
   const json = exportJson();
   const name = `trip-ledger-backup-${todayYMD()}.json`;
   let file = null;
@@ -31,7 +34,7 @@ export async function backupNow() {
       if (e && e.name === 'AbortError') return { cancelled: true };
       throw new Error('共有シートを開けませんでした。もう一度お試しください');
     }
-    markBackedUp('share');
+    markBackedUp('share', version);
     return { ok: true, method: 'share' };
   }
   const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
@@ -42,7 +45,7 @@ export async function backupNow() {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 4000);
-  markBackedUp('download');
+  markBackedUp('download', version);
   return { ok: true, method: 'download' };
 }
 
@@ -53,9 +56,9 @@ export function snoozeBackupReminder() {
 /** 最終バックアップ以降に記録の変更があるか */
 export function hasUnbackedChanges(db = getDb()) {
   if (!db.sessions.length && !db.trips.length) return false;
-  const last = db.prefs.lastBackupAt;
-  if (!last) return true;
-  return (db.lastChangeAt ?? Date.now()) > last;
+  if (!db.prefs.lastBackupAt) return true;
+  const exported = db.prefs.backupVersion ?? db.prefs.lastBackupAt;
+  return (db.lastChangeAt ?? 0) > exported;
 }
 
 /** ホームに出すバックアップのお知らせ。不要なら null */

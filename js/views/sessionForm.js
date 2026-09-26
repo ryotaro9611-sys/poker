@@ -1,10 +1,10 @@
 // セッション入力フォーム（過去のプレイの手入力／編集／タイマー終了後の精算）
-import { getDb } from '../store.js';
+import { getDb, modeGeneration } from '../store.js';
 import * as A from '../actions.js';
 import { resolvePending } from '../rates.js';
 import { validateSession, sessionProfit } from '../calc.js';
 import {
-  esc, todayYMD, fmtMoney, fmtBB, fmtHourly, fmtDuration, fmtInput, fmtTimeInTz, debounce, signClass, parseNumber,
+  esc, todayYMD, fmtMoney, fmtBB, fmtHourly, fmtDuration, fmtInput, fmtTimeInTz, debounce, signClass, parseNumber, onLeave,
 } from '../util.js';
 import { header, toast, showError, busy, confirmDialog, icons } from '../ui.js';
 import {
@@ -59,7 +59,10 @@ function initialValues(db, mode, { session, active, presetTrip }) {
   };
 }
 
+let formCleanup = null;
+
 export function renderSessionForm(el, { mode, id, presetTrip }) {
+  if (formCleanup) { formCleanup(); formCleanup = null; }
   const db = getDb();
   const session = mode === 'edit' ? db.sessions.find((s) => s.id === id) : null;
   const active = mode === 'finish' ? db.active : null;
@@ -75,7 +78,7 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
   if (mode === 'finish' && active.status !== 'settling') {
     // 直接URLで来た場合でもタイマーを止めて精算状態にする
     try { A.settleLive(); } catch (e) { showError(e); }
-    return renderSessionForm(el, { mode, id });
+    return renderSessionForm(el, { mode, id, presetTrip });
   }
 
   const draftKey = mode === 'edit' ? `edit:${id}` : 'new-session';
@@ -83,6 +86,10 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
   let durationEdited = !!(active && active.draft && active.draft.durationEdited);
   let buyinEdited = !!(active && active.draft && active.draft.buyinEdited);
   const a = mode === 'finish' ? getDb().active : null;
+  // この画面が扱う対象（別タブでの変更や、デモ⇔通常の切り替え後に誤って書き込まないため）
+  const gen = modeGeneration();
+  const activeId = a ? a.id : null;
+  const baseUpdatedAt = session ? session.updatedAt : null;
 
   const title = mode === 'new' ? '過去のプレイを記録' : mode === 'edit' ? '記録の編集' : '精算して保存';
   const back = mode === 'new' ? '#/' : mode === 'edit' ? `#/sessions/${id}` : '#/';
@@ -217,8 +224,8 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
   const saveDraft = debounce(() => {
     const raw = readForm(form);
     try {
-      if (mode === 'finish') A.saveLiveDraft({ ...raw, durationEdited, buyinEdited });
-      else A.setDraft(draftKey, raw);
+      if (mode === 'finish') A.saveLiveDraft({ ...raw, durationEdited, buyinEdited }, { activeId, gen });
+      else A.setDraft(draftKey, raw, { gen });
       status.textContent = '入力途中の内容は自動で保存されています';
       status.classList.remove('warn');
     } catch (e) {
@@ -270,7 +277,7 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
     } else if (act === 'back-to-play') {
       await busy(btn, async () => {
         saveDraft.flush();
-        try { A.backToPlay(); location.hash = '#/'; } catch (err) { showError(err); }
+        try { A.backToPlay(activeId); location.hash = '#/'; } catch (err) { showError(err); }
       });
     } else if (act === 'discard-live') {
       const ok = await confirmDialog({
@@ -280,7 +287,7 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
       });
       if (!ok) return;
       saveDraft.cancel();
-      try { A.discardLive(); toast('セッションを破棄しました'); location.hash = '#/'; } catch (err) { showError(err); }
+      try { A.discardLive(activeId); toast('セッションを破棄しました'); location.hash = '#/'; } catch (err) { showError(err); }
     }
   });
   el.querySelector('[data-act="discard-draft"]')?.addEventListener('click', () => {
@@ -306,13 +313,13 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
           location.hash = `#/sessions/${s.id}`;
           resolvePending({ only: [s.id] });
         } else if (mode === 'edit') {
-          const { rateReset } = A.updateSession(id, r.value);
+          const { rateReset } = A.updateSession(id, r.value, baseUpdatedAt);
           A.clearDraft(draftKey);
           toast('変更を保存しました', { type: 'success' });
           location.hash = `#/sessions/${id}`;
           if (rateReset) resolvePending({ only: [id] });
         } else {
-          const s = A.finishLive(r.value);
+          const s = A.finishLive(r.value, activeId);
           toast('セッションを保存しました', { type: 'success' });
           location.hash = `#/sessions/${s.id}`;
           resolvePending({ only: [s.id] });
@@ -331,4 +338,9 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
   refreshPreview();
   refreshRateNote();
   if (mode === 'finish' && !v.cashout) setTimeout(() => form.cashout.focus({ preventScroll: true }), 50);
+
+  // 画面を離れる・アプリが裏に回る・再読み込みの直前に、未保存の入力を確定する
+  const offLeave = onLeave(() => saveDraft.flush());
+  formCleanup = () => { saveDraft.flush(); offLeave(); };
+  return formCleanup;
 }

@@ -1,8 +1,8 @@
 // 遠征：一覧・詳細・作成/編集・削除
-import { getDb } from '../store.js';
+import { getDb, modeGeneration } from '../store.js';
 import * as A from '../actions.js';
 import { tripResult, sortSessions, validateTrip } from '../calc.js';
-import { esc, fmtYen, fmtDuration, fmtBBph, fmtHourly, fmtMoney, fmtDateRange, fmtInput, signClass, todayYMD } from '../util.js';
+import { esc, fmtYen, fmtDuration, fmtBBph, fmtHourly, fmtMoney, fmtDateRange, fmtInput, signClass, todayYMD, debounce, onLeave } from '../util.js';
 import { header, icons, toast, showError, busy, modal, numberDialog, emptyState } from '../ui.js';
 import { readForm, showErrors, clearErrors, attachNumberFormatting } from './fields.js';
 import { sessionRow } from './sessions.js';
@@ -92,9 +92,10 @@ export function renderTripDetail(el, { id }) {
         suffix: '円',
         initial: t.expenses != null ? fmtInput(t.expenses) : '',
         parse: { min: 0, allowEmpty: true, maxDecimals: 0 },
+        onSave: (value) => A.updateTripExpenses(t.id, value),
       });
       if (!res) return;
-      try { A.updateTripExpenses(t.id, res.value); toast(res.value == null ? '経費を未入力に戻しました' : '経費を更新しました', { type: 'success' }); } catch (err) { showError(err); }
+      toast(res.value == null ? '経費を未入力に戻しました' : '経費を更新しました', { type: 'success' });
     } else if (btn.dataset.act === 'delete') {
       await deleteTripFlow(t, r.sessions.length);
     }
@@ -190,14 +191,16 @@ export function renderTripForm(el, { id }) {
 
   const form = el.querySelector('form');
   attachNumberFormatting(form);
-  let timer;
-  form.addEventListener('input', () => {
-    clearTimeout(timer);
-    timer = setTimeout(() => { try { A.setDraft(draftKey, readForm(form)); } catch { /* 下書き保存の失敗は致命的でない */ } }, 400);
-  });
+  const gen = modeGeneration();
+  const baseUpdatedAt = editing ? editing.updatedAt : null;
+  const saveDraft = debounce(() => {
+    try { A.setDraft(draftKey, readForm(form), { gen }); } catch { /* 下書き保存の失敗は致命的でない */ }
+  }, 400);
+  const timer = { cancel: () => saveDraft.cancel() };
+  form.addEventListener('input', () => saveDraft());
   form.querySelector('[data-act="clear-end"]').addEventListener('click', () => { form.endDate.value = ''; form.dispatchEvent(new Event('input')); });
   form.querySelector('[data-act="cancel"]').addEventListener('click', () => {
-    clearTimeout(timer);
+    timer.cancel();
     A.clearDraft(draftKey);
     location.hash = back;
   });
@@ -208,10 +211,10 @@ export function renderTripForm(el, { id }) {
       const r = validateTrip(readForm(form));
       if (!r.ok) { showErrors(form, r.errors); return; }
       clearErrors(form);
-      clearTimeout(timer);
+      timer.cancel();
       try {
         if (editing) {
-          A.updateTrip(id, r.value);
+          A.updateTrip(id, r.value, baseUpdatedAt);
           A.clearDraft(draftKey);
           toast('遠征を更新しました', { type: 'success' });
           location.hash = `#/trips/${id}`;
@@ -226,4 +229,6 @@ export function renderTripForm(el, { id }) {
       }
     });
   });
+  const offLeave = onLeave(() => saveDraft.flush());
+  return () => { saveDraft.flush(); offLeave(); };
 }

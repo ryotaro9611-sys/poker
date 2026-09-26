@@ -65,6 +65,15 @@ export function showError(e, retry) {
 
 /* ---------------- ダイアログ ---------------- */
 
+/** ダイアログ表示中は背面を操作・フォーカスできないようにする */
+function setBackgroundInert(on) {
+  for (const id of ['banner', 'view', 'livebar', 'tabbar']) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    if (on) { el.setAttribute('inert', ''); el.setAttribute('aria-hidden', 'true'); } else { el.removeAttribute('inert'); el.removeAttribute('aria-hidden'); }
+  }
+}
+
 /**
  * モーダルを開く。actions: [{label, value, kind}]。閉じると選んだ value（キャンセルは null）で解決。
  * onAction(value, el) が false を返すと閉じない（入力検証用）。
@@ -85,18 +94,32 @@ export function modal({ title, body = '', actions = [], onMount, onAction }) {
       </div>`;
     root.appendChild(wrap);
     document.body.classList.add('modal-open');
+    setBackgroundInert(true);
     requestAnimationFrame(() => wrap.classList.add('show'));
     const done = (v) => {
       wrap.classList.remove('show');
       document.removeEventListener('keydown', onKey);
       setTimeout(() => {
         wrap.remove();
-        if (!root.children.length) document.body.classList.remove('modal-open');
+        if (!root.children.length) {
+          document.body.classList.remove('modal-open');
+          setBackgroundInert(false);
+        }
         if (prevFocus && prevFocus.focus) try { prevFocus.focus({ preventScroll: true }); } catch { /* noop */ }
       }, 180);
       resolve(v);
     };
-    const onKey = (e) => { if (e.key === 'Escape') done(null); };
+    const onKey = (e) => {
+      if (e.key === 'Escape') { done(null); return; }
+      if (e.key === 'Tab') {
+        // ダイアログの外へフォーカスが出ないようにする
+        const items = [...wrap.querySelectorAll('button:not([disabled]), input:not([disabled]), select, textarea, a[href], [tabindex]:not([tabindex="-1"])')];
+        if (!items.length) return;
+        const first = items[0];
+        const last = items[items.length - 1];
+        if (!wrap.contains(document.activeElement)) { e.preventDefault(); first.focus(); } else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); } else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+    };
     document.addEventListener('keydown', onKey);
     wrap.addEventListener('click', (e) => { if (e.target === wrap) done(null); });
     wrap.querySelectorAll('.modal-actions button').forEach((b) => {
@@ -140,7 +163,8 @@ export async function confirmDialog({ title, message, confirmText = 'OK', cancel
 }
 
 /** 数値を1つ入力させるダイアログ。validate は parseNumber の結果を受け取りエラー文字列を返す */
-export function numberDialog({ title, message = '', label, suffix = '', initial = '', confirmText = '保存', parse = {}, validate, hint = '' }) {
+/** onSave(value) を渡すと、保存に成功したときだけ閉じる（失敗時は入力を残してエラー表示） */
+export function numberDialog({ title, message = '', label, suffix = '', initial = '', confirmText = '保存', parse = {}, validate, hint = '', onSave }) {
   let result = null;
   return modal({
     title,
@@ -165,7 +189,7 @@ export function numberDialog({ title, message = '', label, suffix = '', initial 
       const input = el.querySelector('input');
       setTimeout(() => { input.focus(); input.select(); }, 60);
     },
-    onAction: (value, el) => {
+    onAction: async (value, el) => {
       const input = el.querySelector('input');
       const err = el.querySelector('.field-error');
       const r = parseNumber(input.value, parse);
@@ -175,6 +199,17 @@ export function numberDialog({ title, message = '', label, suffix = '', initial 
         input.setAttribute('aria-invalid', 'true');
         input.focus();
         return false;
+      }
+      if (onSave) {
+        const btns = el.querySelectorAll('.modal-actions button');
+        btns.forEach((b) => { b.disabled = true; });
+        try {
+          await onSave(r.value);
+        } catch (e) {
+          err.textContent = e && e.message ? e.message : String(e);
+          btns.forEach((b) => { b.disabled = false; });
+          return false;
+        }
       }
       result = r.value;
       return true;

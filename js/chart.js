@@ -132,7 +132,8 @@ export function mountChart(container, series, { unit, format, cumLabel = '期間
   let dragging = false;
   svg.addEventListener('pointerdown', (e) => { dragging = true; pick(e.clientX); });
   svg.addEventListener('pointermove', (e) => { if (dragging || e.pointerType === 'mouse') pick(e.clientX); });
-  window.addEventListener('pointerup', () => { dragging = false; }, { passive: true });
+  const onUp = () => { dragging = false; };
+  window.addEventListener('pointerup', onUp, { passive: true });
   svg.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowLeft') { sel = Math.max(0, sel - 1); placeCursor(); e.preventDefault(); }
     if (e.key === 'ArrowRight') { sel = Math.min(pts.length - 1, sel + 1); placeCursor(); e.preventDefault(); }
@@ -144,5 +145,5 @@ export function mountChart(container, series, { unit, format, cumLabel = '期間
     if (Math.abs(box.clientWidth - lastW) > 2) { lastW = box.clientWidth; draw(); }
   });
   ro.observe(box);
-  return () => ro.disconnect();
+  return () => { ro.disconnect(); window.removeEventListener('pointerup', onUp); };
 }

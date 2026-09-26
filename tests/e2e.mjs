@@ -59,27 +59,51 @@ ws.addEventListener('message', async (e) => {
     return;
   }
   if (m.method === 'Runtime.exceptionThrown') jsErrors.push(m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text);
-  if (m.method === 'Fetch.requestPaused') {
-    // 為替APIを差し替え
-    const { requestId, request } = m.params;
-    const url = new URL(request.url);
-    rateRequests.push(request.url);
-    if (rateMode === 'fail') { send('Fetch.failRequest', { requestId, errorReason: 'InternetDisconnected' }); return; }
-    let body;
-    if (url.hostname.includes('frankfurter')) {
-      const base = url.searchParams.get('base');
-      body = JSON.stringify([{ date: url.searchParams.get('to'), base, quote: 'JPY', rate: MOCK_RATES[base] }]);
-    } else {
-      send('Fetch.failRequest', { requestId, errorReason: 'InternetDisconnected' });
-      return;
-    }
-    send('Fetch.fulfillRequest', {
-      requestId, responseCode: 200,
-      responseHeaders: [{ name: 'Content-Type', value: 'application/json' }, { name: 'Access-Control-Allow-Origin', value: '*' }],
-      body: Buffer.from(body).toString('base64'),
-    });
-  }
+  if (m.method === 'Fetch.requestPaused') handleRateRequest(m.params);
 });
+
+/* ---------- 為替APIの差し替え ----------
+ * rateMode: 'ok'（要求日のレート）/ 'fail'（通信失敗）/ 'mixed'（要求日なし・未来日あり）
+ *           'fallback'（Frankfurter失敗→currency-apiで成功）/ 'hold'（応答を保留。releaseHeld() で返す）
+ */
+const held = [];
+function addDays(ymd, n) {
+  const [y, mo, d] = ymd.split('-').map(Number);
+  return new Date(Date.UTC(y, mo - 1, d + n)).toISOString().slice(0, 10);
+}
+function fulfillJson(requestId, obj) {
+  send('Fetch.fulfillRequest', {
+    requestId, responseCode: 200,
+    responseHeaders: [{ name: 'Content-Type', value: 'application/json' }, { name: 'Access-Control-Allow-Origin', value: '*' }],
+    body: Buffer.from(JSON.stringify(obj)).toString('base64'),
+  });
+}
+const failReq = (requestId) => send('Fetch.failRequest', { requestId, errorReason: 'InternetDisconnected' });
+function answerRate({ requestId, request }, mode) {
+  const url = new URL(request.url);
+  if (mode === 'fail') return failReq(requestId);
+  if (url.hostname.includes('frankfurter')) {
+    if (mode === 'fallback') return failReq(requestId);
+    const base = url.searchParams.get('base');
+    const to = url.searchParams.get('to');
+    const rows = mode === 'mixed'
+      ? [{ date: addDays(to, -3), rate: 140 }, { date: addDays(to, -2), rate: 141 }, { date: addDays(to, 2), rate: 999 }]
+      : [{ date: to, rate: MOCK_RATES[base] }];
+    return fulfillJson(requestId, rows.map((r) => ({ ...r, base, quote: 'JPY' })));
+  }
+  // currency-api（jsDelivr）: .../currency-api@YYYY-MM-DD/v1/currencies/usd.json
+  const mm = /currency-api@(\d{4}-\d{2}-\d{2})\/v1\/currencies\/([a-z]+)\.json/.exec(url.pathname);
+  if (mode === 'fallback' && mm) return fulfillJson(requestId, { date: mm[1], [mm[2]]: { jpy: 155 } });
+  return failReq(requestId);
+}
+function handleRateRequest(params) {
+  rateRequests.push(params.request.url);
+  if (rateMode === 'hold') { held.push(params); return; }
+  answerRate(params, rateMode);
+}
+function releaseHeld(mode = 'ok') {
+  while (held.length) answerRate(held.shift(), mode);
+}
 
 async function ev(expr) {
   const r = await send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true });
@@ -327,19 +351,22 @@ test('プレイ中の修正：開始時刻・場所・バイイン内訳', async
 
 test('プレイ中の修正：端末と違うタイムゾーンで始めた記録も現地時刻で直せる', async () => {
   await fresh();
-  const start = Date.UTC(2026, 8, 25, 17, 54); // ロサンゼルス 9/25 10:54
-  const now = Date.now();
-  const s0 = Math.min(start, now - 3600e3);
-  await seed({ active: { id: 'a1', tripId: null, location: 'LA', currency: 'USD', sb: 1, bb: 2, date: '2026-09-25', tz: 'America/Los_Angeles', startedAt: s0, segments: [{ s: s0, e: null }], status: 'playing', buyins: [], draft: null } });
+  // 実行日に依存しないよう、現在時刻の少し前で試す（分単位に丸める）
+  const now = Math.floor(Date.now() / 60000) * 60000;
+  const s0 = now - 2 * 3600e3;
+  const target = now - 3 * 3600e3;
+  await seed({ active: { id: 'a1', tripId: null, location: 'LA', currency: 'USD', sb: 1, bb: 2, date: '2000-01-01', tz: 'America/Los_Angeles', startedAt: s0, segments: [{ s: s0, e: null }], status: 'playing', buyins: [], draft: null } });
   await go('#/live/edit');
   await waitFor(`document.querySelector('[name=startedAt]')`);
   includes(await text('.field-label'), 'America/Los_Angeles の時刻');
-  await setVal('[name=startedAt]', '2026-09-25T09:00');
+  const shown = await ev(`import('./js/util.js').then((u) => [u.toInputInTz(${s0}, 'America/Los_Angeles'), u.toInputInTz(${target}, 'America/Los_Angeles'), u.ymdInTz(${target}, 'America/Los_Angeles')])`);
+  assert((await ev(`document.querySelector('[name=startedAt]').value`)) === shown[0], '開始時刻は記録したタイムゾーンで表示');
+  await setVal('[name=startedAt]', shown[1]);
   await click('[data-act=save]');
   await waitFor(`location.hash === '#/'`);
   const a = (await data()).active;
-  assert(a.startedAt === Date.UTC(2026, 8, 25, 16, 0), `ロサンゼルスの 9:00 として保存（${new Date(a.startedAt).toISOString()}）`);
-  assert(a.date === '2026-09-25', `プレイ日は現地日付（${a.date}）`);
+  assert(a.startedAt === target, `ロサンゼルスの時刻として保存（${new Date(a.startedAt).toISOString()}）`);
+  assert(a.date === shown[2], `プレイ日は現地日付（${a.date}）`);
 });
 
 test('換算待ち：通信失敗でも保存、0円扱いしない、手入力は上書きされない、日付変更で取り直し', async () => {
@@ -444,13 +471,21 @@ test('デモ：仕様の数値どおり、実データと進行中セッショ�
   await go('#/sessions/demo-s1');
   t = await text();
   includes(t, '+240 USD'); includes(t, '+36,000円'); includes(t, '+48 USD/時'); includes(t, '+9.6 bb/時');
-  // デモ中にタイマー開始しても実データは変わらない
+  // デモ中に記録の追加・タイマー開始をしても実データは変わらない
+  await manualSession({ location: 'DemoOnly' });
   await go('#/');
-  assert(await ev(`localStorage.getItem('tripledger:data:v1')`) === before, 'デモ操作で実データが変わらない');
   includes(await text(), '通常モードで進行中のセッションがあります');
+  await go('#/live/start');
+  await setVal('[name=location]', 'DemoLive');
+  await setVal('[name=sb]', '1'); await setVal('[name=bb]', '2');
+  await click('[data-act=start]');
+  await waitFor(`document.querySelector('.live-card')?.innerText.includes('DemoLive')`);
+  assert(await ev(`localStorage.getItem('tripledger:data:v1')`) === before, 'デモ操作で実データが変わらない');
   await click('[data-banner=exit-demo]');
   await waitFor(`!document.querySelector('.banner-demo')`);
   includes(await text(), 'RealLive');
+  const after = await data();
+  assert(after.sessions.length === 1 && after.active.id === 'act', 'デモの記録・タイマーは実データにない');
   await ev(`sessionStorage.clear()`);
 });
 
@@ -546,18 +581,258 @@ test('オフライン：一度読み込めば、通信なしで起動・記録�
     await go('#/live/start');
     await setVal('[name=location]', 'Offline');
     await setVal('[name=sb]', '1'); await setVal('[name=bb]', '2');
+    await setVal('[name=buyin]', '100');
     await click('[data-act=start]');
     await waitFor(`location.hash === '#/' && document.querySelector('.live-card')`);
+    await click('[data-live=finish]');
+    await waitFor(`document.querySelector('[name=cashout]')`);
+    await setVal('[name=mins]', '30');
+    await setVal('[name=cashout]', '160');
+    await click('[data-act=save]');
+    await waitFor(`/^#\\/sessions\\/[^/]+$/.test(location.hash)`, 5000, 'オフラインで保存');
+    await reload();
+    const d = await data();
+    assert(d.sessions.length === 1 && d.sessions[0].location === 'Offline' && !d.active, 'オフラインで保存され、再読み込み後も残る');
     await go('#/stats');
-    includes(await text(), '成績');
+    await setVal('[data-f=view]', 'USD');
+    const t = await text();
+    includes(t, '+60 USD', 'オフラインでも成績に反映');
   } finally {
     await send('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
   }
 });
 
+/* ---------- レビュー指摘の回帰テスト ---------- */
+
+const baseSession = { id: 's1', tripId: null, date: '2026-09-01', location: 'A', currency: 'JPY', sb: 1, bb: 2, buyin: 100, cashout: 300, timeRake: 0, minutes: 60, rate: null };
+async function importFile(obj) {
+  await go('#/settings');
+  await ev(`(() => { const dt = new DataTransfer(); dt.items.add(new File([${q(JSON.stringify(obj))}], 'b.json', { type: 'application/json' })); const i = document.querySelector('input[data-act=import]'); i.files = dt.files; i.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await waitFor(`document.querySelector('.modal .btn-danger')`);
+  await click('.modal .btn-danger');
+}
+
+test('復元：不正なバックアップは取り込まず、今のデータを残す（XSS・null・範囲外）', async () => {
+  await fresh();
+  await seed({ sessions: [baseSession] });
+  const before = await ev(`localStorage.getItem('tripledger:data:v1')`);
+  const bad = [
+    { trips: [], sessions: [null] },
+    { trips: [], sessions: [{ ...baseSession, condition: '"><img src=x onerror="window.__xss=1">' }] },
+    { trips: [], sessions: [{ ...baseSession, minutes: -5 }] },
+    { trips: [], sessions: [{ ...baseSession, tripId: 'missing' }] },
+    { trips: [], sessions: [baseSession, baseSession] },
+    { trips: [], sessions: [baseSession], active: { id: 'x', status: '"><b>', segments: [] } },
+  ];
+  for (const b of bad) {
+    await importFile({ data: b });
+    await waitFor(`document.querySelector('.toast-error')`, 3000, 'エラー表示');
+    includes(await text('.toast-error'), '復元しませんでした');
+    assert(await ev(`localStorage.getItem('tripledger:data:v1')`) === before, `既存データが変わらない: ${JSON.stringify(b).slice(0, 60)}`);
+    await ev(`document.querySelector('.toast-close')?.click()`);
+    await sleep(250);
+  }
+  assert(!(await ev('window.__xss')), 'スクリプトが実行されない');
+});
+
+test('読み込み：端末内の値が壊れていても記録は残し、画面にHTMLを埋め込まない', async () => {
+  await fresh();
+  await seed({ sessions: [{ ...baseSession, condition: '"><img src=x onerror="window.__xss=1">', tags: ['loose', '<b>'] }] });
+  await go('#/sessions/s1');
+  const t = await text();
+  includes(t, '未入力', '壊れた冴えは未入力に');
+  assert(!(await ev('window.__xss')), 'スクリプトが実行されない');
+  assert(!(await ev(`!!document.querySelector('#view img')`)), 'HTMLが埋め込まれない');
+  const keys = await ev(`Object.keys(localStorage).filter((k) => k.includes(':corrupt:')).length`);
+  assert(keys >= 1, '元データを退避');
+});
+
+test('デモの精算下書きが、通常モードの下書きを上書きしない', async () => {
+  await fresh();
+  const now = Date.now();
+  await seed({ active: { id: 'real', tripId: null, location: 'RealClub', currency: 'USD', sb: 1, bb: 2, date: '2026-09-20', tz: 'Asia/Tokyo', startedAt: now - 3600e3, segments: [{ s: now - 3600e3, e: now - 60e3 }], status: 'settling', endedAt: now - 60e3, buyins: [], draft: { cashout: '123', location: 'RealClub' } } });
+  await go('#/settings');
+  await click('[data-act=demo]');
+  await waitFor(`document.querySelector('.banner-demo')`);
+  await go('#/live/start');
+  await setVal('[name=location]', 'DemoClub');
+  await setVal('[name=sb]', '1'); await setVal('[name=bb]', '2');
+  await click('[data-act=start]');
+  await waitFor(`document.querySelector('[data-live=finish]')`);
+  await click('[data-live=finish]');
+  await waitFor(`document.querySelector('[name=cashout]')`);
+  await setVal('[name=cashout]', '888');
+  await click('[data-banner=exit-demo]'); // 下書きの保存予約（350ms）が残っている間に通常へ戻る
+  await sleep(700);
+  const a = (await data()).active;
+  assert(a.draft.cashout === '123' && a.draft.location === 'RealClub', `実データの下書きはそのまま（${JSON.stringify(a.draft)}）`);
+  await ev(`sessionStorage.clear()`);
+});
+
+test('別タブで保存・開始された後、古い精算画面から別セッションを終了しない', async () => {
+  await fresh();
+  const now = Date.now();
+  const mk = (id, loc) => ({ id, tripId: null, location: loc, currency: 'USD', sb: 1, bb: 2, date: '2026-09-20', tz: 'Asia/Tokyo', startedAt: now - 3600e3, segments: [{ s: now - 3600e3, e: null }], status: 'playing', buyins: [], draft: null });
+  await seed({ active: mk('X', 'Club X') });
+  await click('[data-live=finish]');
+  await waitFor(`document.querySelector('[name=cashout]')`);
+  await setVal('[name=cashout]', '500');
+  // 別タブの操作を再現：X を保存して新しい Y を開始
+  const savedX = JSON.stringify({ ...baseSession, id: 'X', location: 'Club X' });
+  const liveY = JSON.stringify(mk('Y', 'Club Y'));
+  await ev(`(() => { const d = JSON.parse(localStorage.getItem('tripledger:data:v1')); d.sessions.push(JSON.parse(${q(savedX)})); d.active = JSON.parse(${q(liveY)}); localStorage.setItem('tripledger:data:v1', JSON.stringify(d)); })()`);
+  await click('[data-act=save]');
+  await waitFor(`document.querySelector('.toast-error')`, 3000, '競合の通知');
+  includes(await text('.toast-error'), 'すでに保存されています');
+  const d = await data();
+  assert(d.active && d.active.id === 'Y' && d.active.location === 'Club Y', '新しいセッション Y はそのまま');
+  assert(d.sessions.length === 1, '重複して保存されない');
+  assert((await ev(`document.querySelector('[name=cashout]').value`)) === '500', '入力は残る');
+});
+
+test('数値ダイアログ：保存に失敗したら閉じずに入力を残す', async () => {
+  await fresh();
+  await seed({ trips: [{ id: 't1', name: 'T', startDate: '2026-04-01', endDate: null, expenses: 100 }] });
+  await go('#/trips/t1');
+  await click('[data-act=expenses]');
+  await waitFor(`document.querySelector('.modal input')`);
+  await setVal('.modal input', '12,345');
+  await ev(`window.__setItem = Storage.prototype.setItem; Storage.prototype.setItem = function () { throw new DOMException('quota', 'QuotaExceededError'); }`);
+  await modalPrimary();
+  await waitFor(`document.querySelector('.modal .field-error')?.textContent.includes('保存に失敗')`, 3000, 'ダイアログ内のエラー');
+  assert((await ev(`document.querySelector('.modal input').value`)) === '12,345', '入力が残る');
+  await ev(`Storage.prototype.setItem = window.__setItem`);
+  await modalPrimary();
+  await waitFor(`!document.querySelector('.modal-backdrop')`);
+  assert((await data()).trips[0].expenses === 12345, '再試行で保存');
+});
+
+test('精算の入力直後に再読み込みしても、最新の入力が残る', async () => {
+  await fresh();
+  const now = Date.now();
+  await seed({ active: { id: 'r', tripId: null, location: 'R', currency: 'USD', sb: 1, bb: 2, date: '2026-09-20', tz: 'Asia/Tokyo', startedAt: now - 3600e3, segments: [{ s: now - 3600e3, e: now - 60e3 }], status: 'settling', endedAt: now - 60e3, buyins: [], draft: { cashout: '123' } } });
+  await go('#/live/finish');
+  await waitFor(`document.querySelector('[name=cashout]')?.value === '123'`);
+  await setVal('[name=cashout]', '777');
+  await reload(); // 待たずに再読み込み
+  assert((await ev(`document.querySelector('[name=cashout]').value`)) === '777', '最新の入力が残る');
+});
+
+test('バックアップ：共有中に変わった内容は「未バックアップ」のまま', async () => {
+  await fresh();
+  await seed({ sessions: [baseSession] });
+  await ev(`window.__release = null; navigator.canShare = () => true; navigator.share = () => new Promise((r) => { window.__release = r; })`);
+  await click('[data-act=backup]');
+  await waitFor(`!!window.__release`);
+  await ev(`import('./js/actions.js').then((m) => m.createTrip({ name: '共有中に追加', startDate: '2026-09-01', endDate: null, expenses: null, note: '' }))`);
+  await ev(`window.__release()`);
+  await waitFor(`JSON.parse(localStorage.getItem('tripledger:data:v1')).prefs.lastBackupAt > 0`);
+  assert(await ev(`import('./js/backup.js').then((m) => m.hasUnbackedChanges())`), '共有中の変更は未バックアップ扱い');
+});
+
+test('為替：取得中に日付を変えても、新しい日付のレートを取りにいく', async () => {
+  await fresh();
+  rateMode = 'hold';
+  await manualSession({ date: '2026-04-04' });
+  await waitFor(`true`);
+  await sleep(300);
+  const id = (await data()).sessions[0].id;
+  await go(`#/sessions/${id}/edit`);
+  await waitFor(`document.querySelector('[name=date]')`);
+  await setVal('[name=date]', '2026-04-05');
+  await click('[data-act=save]');
+  await waitFor(`!location.hash.endsWith('/edit')`);
+  rateMode = 'ok';
+  releaseHeld('ok'); // 古い（4/4）要求の応答
+  await waitFor(`JSON.parse(localStorage.getItem('tripledger:data:v1')).sessions[0].rate?.date === '2026-04-05'`, 5000, '4/5のレート');
+});
+
+test('為替：休日（当日なし）と未来日が混ざった応答では、プレイ日以前の直近を使う', async () => {
+  await fresh();
+  rateMode = 'mixed';
+  await manualSession({ date: '2026-04-06' });
+  await waitFor(`JSON.parse(localStorage.getItem('tripledger:data:v1')).sessions[0].rate`, 5000, 'レート');
+  const r = (await data()).sessions[0].rate;
+  assert(r.date === '2026-04-04' && r.value === 141, `直近の過去日（${r.date} / ${r.value}）`);
+  rateMode = 'ok';
+});
+
+test('為替：Frankfurter が失敗したら currency-api に切り替える', async () => {
+  await fresh();
+  rateMode = 'fallback';
+  await manualSession({ date: '2026-04-06' });
+  await waitFor(`JSON.parse(localStorage.getItem('tripledger:data:v1')).sessions[0].rate`, 5000, 'レート');
+  const r = (await data()).sessions[0].rate;
+  assert(r.value === 155 && r.source.includes('currency-api') && r.date === '2026-04-06', JSON.stringify(r));
+  rateMode = 'ok';
+});
+
+test('遠征の比較：換算待ちがある間は「上回った」と判定しない', async () => {
+  await fresh();
+  await seed({
+    trips: [{ id: 't1', name: 'T', startDate: '2026-04-01', endDate: '2026-04-05', expenses: 5000 }],
+    sessions: [
+      { ...baseSession, id: 'c1', tripId: 't1', buyin: 1000, cashout: 2000, minutes: 60 },
+      { ...baseSession, id: 'p1', tripId: 't1', currency: 'USD', minutes: 540, buyin: 100, cashout: 100, rate: null, date: '2099-01-01' },
+    ],
+  });
+  await go('#/trips/compare');
+  const t = await text();
+  includes(t, '換算待ちのため保留');
+  assert(!t.includes('上回った'), '判定しない');
+});
+
+test('休憩中に終了しても、最後の休憩時間を記録する', async () => {
+  await fresh();
+  const now = Date.now();
+  await seed({ active: { id: 'b', tripId: null, location: 'B', currency: 'JPY', sb: 1, bb: 2, date: '2026-09-20', tz: 'Asia/Tokyo', startedAt: now - 2 * 3600e3, segments: [{ s: now - 2 * 3600e3, e: now - 3600e3 }], status: 'break', buyins: [], draft: null } });
+  await click('[data-live=finish]');
+  await waitFor(`document.querySelector('[name=cashout]')`);
+  includes(await text('.timer-summary'), '1時間', '精算画面の休憩');
+  await setVal('[name=cashout]', '0');
+  await click('[data-act=save]');
+  await waitFor(`/^#\\/sessions\\//.test(location.hash)`);
+  const s0 = (await data()).sessions[0];
+  assert(s0.breakMinutes === 60 && s0.minutes === 60, `休憩${s0.breakMinutes}分・実プレイ${s0.minutes}分`);
+});
+
+test('ダイアログ：Tab キーでフォーカスが背面に抜けない', async () => {
+  await fresh();
+  await seed({ trips: [{ id: 't1', name: 'T', startDate: '2026-04-01', endDate: null, expenses: 100 }] });
+  await go('#/trips/t1');
+  await click('[data-act=expenses]');
+  await waitFor(`document.querySelector('.modal input')`);
+  for (let i = 0; i < 7; i++) {
+    await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+    await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+    assert(await ev(`document.querySelector('.modal').contains(document.activeElement)`), `${i + 1}回目のTabでダイアログ内`);
+  }
+  assert(await ev(`document.getElementById('view').hasAttribute('inert')`), '背面は操作不可');
+  await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+  await waitFor(`!document.querySelector('.modal-backdrop')`);
+  assert(!(await ev(`document.getElementById('view').hasAttribute('inert')`)), '閉じたら背面の操作が戻る');
+});
+
+test('プレイ中の修正：夏時間の切り替えで存在しない時刻はエラーにする', async () => {
+  await fresh();
+  const now = Date.now();
+  await seed({ active: { id: 'd', tripId: null, location: 'LA', currency: 'USD', sb: 1, bb: 2, date: '2026-09-20', tz: 'America/Los_Angeles', startedAt: now - 3600e3, segments: [{ s: now - 3600e3, e: null }], status: 'playing', buyins: [], draft: null } });
+  await go('#/live/edit');
+  await waitFor(`document.querySelector('[name=startedAt]')`);
+  await setVal('[name=startedAt]', '2026-03-08T02:30');
+  await click('[data-act=save]');
+  await waitFor(`document.querySelector('[data-err=startedAt]')?.textContent`);
+  includes(await text('[data-err=startedAt]'), '夏時間');
+  assert((await data()).active.startedAt === now - 3600e3, '開始時刻は変わらない');
+});
+
 test('画面幅：375px・430px で横にはみ出さない', async () => {
   await fresh();
   await ev(`sessionStorage.setItem('tripledger:demo', '1')`);
+  await reload();
+  assert(await ev(`!!document.querySelector('.banner-demo')`), 'デモが有効になっていること');
+  await go('#/sessions/demo-s3');
+  includes(await text(), 'Club B', 'デモの詳細画面が表示されること');
   const routes = ['#/', '#/sessions', '#/sessions/demo-s3', '#/sessions/new', '#/stats', '#/trips', '#/trips/demo-trip-b', '#/trips/compare', '#/settings', '#/live/start'];
   const bad = [];
   for (const w of [375, 430]) {

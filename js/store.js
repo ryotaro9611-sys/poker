@@ -1,5 +1,6 @@
 // データ保存層：端末の localStorage に保存。デモはメモリ上だけで扱い、実データには一切書き込まない。
 import { buildDemoDb } from './demo.js';
+import { validateData } from './schema.js';
 
 const KEY = 'tripledger:data:v1';
 const DEMO_FLAG = 'tripledger:demo';
@@ -14,6 +15,10 @@ export class SaveError extends Error {
 export class UserError extends Error {
   constructor(msg) { super(msg); this.name = 'UserError'; }
 }
+/** 別の画面・タブで先に変更された（入力内容は残す） */
+export class ConflictError extends UserError {
+  constructor(msg) { super(msg); this.name = 'ConflictError'; }
+}
 
 export function emptyDb() {
   return { version: 1, trips: [], sessions: [], active: null, drafts: {}, prefs: {}, rateCache: {} };
@@ -22,21 +27,22 @@ export function emptyDb() {
 let real = null;
 let demoDb = null;
 let demo = false;
+// デモ⇔通常の切り替えごとに増える。遅延保存が切り替え後の別データへ書き込むのを防ぐ
+let generation = 0;
+let quarantined = null;
 const listeners = new Set();
 export const status = { storageOk: true, notice: null };
 
-function normalize(d) {
-  const base = emptyDb();
-  if (!d || typeof d !== 'object') return base;
-  return {
-    ...base,
-    ...d,
-    trips: Array.isArray(d.trips) ? d.trips : [],
-    sessions: Array.isArray(d.sessions) ? d.sessions : [],
-    drafts: d.drafts && typeof d.drafts === 'object' ? d.drafts : {},
-    prefs: d.prefs && typeof d.prefs === 'object' ? d.prefs : {},
-    rateCache: d.rateCache && typeof d.rateCache === 'object' ? d.rateCache : {},
-  };
+/** 端末内データの読み込み：不正な記録は除外し、元データは消さずに別キーへ退避する */
+function normalize(d, raw) {
+  const { data, problems } = validateData(d, { strict: false });
+  if (!problems.length) return data;
+  if (quarantined !== raw) {
+    quarantined = raw;
+    try { localStorage.setItem(`${KEY}:corrupt:${Date.now()}`, raw); } catch { /* noop */ }
+    status.notice = `保存データの一部（${problems.length}件）が壊れていたため除外して開きました。元のデータは端末内に退避しています。（${problems[0]}）`;
+  }
+  return data || emptyDb();
 }
 
 function readReal() {
@@ -50,7 +56,7 @@ function readReal() {
   }
   if (!raw) return emptyDb();
   try {
-    return normalize(JSON.parse(raw));
+    return normalize(JSON.parse(raw), raw);
   } catch (e) {
     // 壊れたデータは消さずに退避してから空で開始
     try { localStorage.setItem(`${KEY}:corrupt:${Date.now()}`, raw); } catch { /* noop */ }
@@ -75,6 +81,10 @@ export function init() {
   });
 }
 
+export function modeGeneration() {
+  return generation;
+}
+
 export function getDb() {
   return demo ? demoDb : real;
 }
@@ -88,12 +98,14 @@ export function isDemo() {
 export function enterDemo() {
   demoDb = buildDemoDb(emptyDb);
   demo = true;
+  generation++;
   try { sessionStorage.setItem(DEMO_FLAG, '1'); } catch { /* noop */ }
   emit({ mode: true });
 }
 export function exitDemo() {
   demo = false;
   demoDb = null;
+  generation++;
   try { sessionStorage.removeItem(DEMO_FLAG); } catch { /* noop */ }
   real = readReal();
   emit({ mode: true });
@@ -115,7 +127,9 @@ const clone = (o) => JSON.parse(JSON.stringify(o));
  * 変更を適用して保存する。保存に失敗した場合は状態を一切変えずに SaveError を投げる。
  * 別タブでの変更を上書きしないよう、実データは保存直前に最新を読み直してから適用する。
  */
-export function commit(mutator, { silent = false, touch = !silent } = {}) {
+export function commit(mutator, { silent = false, touch = !silent, gen = null } = {}) {
+  // 画面を開いたときとモードが変わっていたら書き込まない（遅延保存用）
+  if (gen != null && gen !== generation) return undefined;
   if (demo) {
     const next = clone(demoDb);
     if (touch) next.lastChangeAt = Date.now();
@@ -164,7 +178,12 @@ export function importJson(text) {
     throw new UserError('このアプリのバックアップファイルではないようです');
   }
   if (demo) throw new UserError('デモ中は復元できません。通常モードに戻ってから操作してください');
-  const next = normalize(data);
+  // 1か所でも不正があれば取り込まず、今のデータをそのまま残す
+  const { data: next, problems } = validateData(data, { strict: true });
+  if (!next) {
+    throw new UserError(`バックアップの内容に不正な値があるため復元しませんでした（${problems.length}件：${problems.slice(0, 2).join('／')}）。今のデータはそのままです。`);
+  }
+  next.lastChangeAt = Date.now();
   try {
     localStorage.setItem(KEY, JSON.stringify(next));
   } catch (e) {

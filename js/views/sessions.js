@@ -208,7 +208,7 @@ export function renderSessionDetail(el, { id }) {
       <section class="card">
         <h3 class="card-title">その他</h3>
         <div class="kv"><span class="k">遠征</span><span class="v">${trip ? `<a href="#/trips/${esc(trip.id)}">${esc(trip.name)}</a>` : '遠征なし'}</span></div>
-        <div class="kv"><span class="k">今日の冴え</span><span class="v">${s.condition ? `<span class="cond-badge c${s.condition}">${esc(conditionLabel(s.condition))}</span>` : '<span class="muted">未入力</span>'}</span></div>
+        <div class="kv"><span class="k">今日の冴え</span><span class="v">${s.condition ? `<span class="cond-badge c${esc(s.condition)}">${esc(conditionLabel(s.condition))}</span>` : '<span class="muted">未入力</span>'}</span></div>
         <div class="kv"><span class="k">タグ</span><span class="v">${s.tags && s.tags.length ? s.tags.map((t) => `<span class="tag">${esc(tagLabel(t))}</span>`).join(' ') : '<span class="muted">なし</span>'}</span></div>
         ${s.startedAt ? `
           <div class="kv"><span class="k">開始</span><span class="v">${esc(fmtTimeInTz(s.startedAt, s.tz))}</span></div>
@@ -242,9 +242,10 @@ export function renderSessionDetail(el, { id }) {
         initial: s.rate ? String(s.rate.value) : '',
         parse: { min: 0, maxDecimals: 6 },
         validate: (r) => (r.value > 0 ? null : '0より大きい値を入力してください'),
+        onSave: (value) => A.setManualRate(s.id, value),
       });
       if (!res) return;
-      try { A.setManualRate(s.id, res.value); toast('手入力レートを保存しました', { type: 'success' }); } catch (err) { showError(err); }
+      toast('手入力レートを保存しました', { type: 'success' });
     } else if (act === 'auto-rate') {
       const ok = await confirmDialog({ title: '自動取得に戻しますか？', message: '手入力したレートを解除し、プレイ日のレートを自動取得します。取得できるまでは換算待ちになります。', confirmText: '自動取得に戻す' });
       if (!ok) return;

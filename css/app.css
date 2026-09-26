@@ -620,3 +620,4 @@ a.stat-sub { color: var(--text-2); text-decoration: underline; text-decoration-c
 @media (max-width: 380px) {
   .cond-dot { width: 34px; height: 34px; }
 }
+.be-line .be-hold { background: var(--warn-soft); color: var(--warn); }

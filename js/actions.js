@@ -1,5 +1,5 @@
 // データ操作（遠征・セッション・タイマー）。すべて store.commit 経由で原子的に保存する。
-import { commit, getDb, UserError } from './store.js';
+import { commit, getDb, UserError, ConflictError } from './store.js';
 import { uid, todayYMD, ymdFromDate, ymdInTz, currentTz } from './util.js';
 import { MAX_MINUTES } from './calc.js';
 
@@ -74,10 +74,11 @@ export function createTrip(v) {
   });
 }
 
-export function updateTrip(id, v) {
+export function updateTrip(id, v, baseUpdatedAt) {
   return commit((db) => {
     const t = db.trips.find((x) => x.id === id);
     if (!t) throw new UserError('この遠征は見つかりません（削除された可能性があります）');
+    if (baseUpdatedAt != null && t.updatedAt !== baseUpdatedAt) throw new ConflictError(CHANGED_ELSEWHERE);
     Object.assign(t, v, { updatedAt: Date.now() });
     return t;
   });
@@ -117,10 +118,11 @@ export function createSession(v, extra = {}) {
   });
 }
 
-export function updateSession(id, v) {
+export function updateSession(id, v, baseUpdatedAt) {
   return commit((db) => {
     const s = db.sessions.find((x) => x.id === id);
     if (!s) throw new UserError('このセッションは見つかりません（削除された可能性があります）');
+    if (baseUpdatedAt != null && s.updatedAt !== baseUpdatedAt) throw new ConflictError(CHANGED_ELSEWHERE);
     const rateReset = s.date !== v.date || s.currency !== v.currency;
     Object.assign(s, v, { updatedAt: Date.now() });
     if (rateReset) s.rate = null; // プレイ日・通貨が変わったら、そのプレイ日のレートを取り直す
@@ -176,6 +178,8 @@ export function liveBreakMs(a, now = Date.now()) {
   for (let i = 1; i < a.segments.length; i++) total += a.segments[i].s - a.segments[i - 1].e;
   const last = a.segments[a.segments.length - 1];
   if (a.status === 'break' && last.e) total += now - last.e;
+  // 休憩中に終了した場合、最後の休憩は終了時刻まで
+  if (a.status === 'settling' && last.e && a.endedAt && a.endedAt > last.e) total += a.endedAt - last.e;
   return total;
 }
 export function liveBuyinTotal(a) {
@@ -207,9 +211,14 @@ export function startLive(v) {
   });
 }
 
-function withActive(fn) {
+const CHANGED_ELSEWHERE = '別の画面（タブ）でこの内容が先に変更されました。入力内容は残っています。画面を開き直して確認してください。';
+const LIVE_CHANGED = '別の画面（タブ）で、このセッションはすでに保存・破棄されたか、新しいセッションが始まっています。入力内容は残っています。';
+
+/** expectedId を渡すと、画面が扱っているセッションと一致するときだけ変更する */
+function withActive(fn, expectedId) {
   return commit((db) => {
-    if (!db.active) throw new UserError('進行中のセッションはありません');
+    if (!db.active) throw new (expectedId ? ConflictError : UserError)(expectedId ? LIVE_CHANGED : '進行中のセッションはありません');
+    if (expectedId && db.active.id !== expectedId) throw new ConflictError(LIVE_CHANGED);
     return fn(db.active, db);
   });
 }
@@ -232,23 +241,23 @@ export function resumeLive() {
   });
 }
 
-export function addBuyin(amount) {
+export function addBuyin(amount, expectedId) {
   return withActive((a) => {
     a.buyins.push({ amount, at: Date.now() });
     return a;
-  });
+  }, expectedId);
 }
-export function removeLastBuyin() {
+export function removeLastBuyin(expectedId) {
   return withActive((a) => {
     a.buyins.pop();
     return a;
-  });
+  }, expectedId);
 }
 /**
  * プレイ中の情報を修正（場所・通貨・レート・遠征・バイイン内訳・開始時刻）。
  * 開始時刻を変えるとプレイ日もその日付になる（開始の押し忘れ対策）。
  */
-export function editLive(v) {
+export function editLive(v, expectedId) {
   return withActive((a) => {
     if (a.status === 'settling') throw new UserError('精算入力中です。精算画面で修正してください');
     const now = Date.now();
@@ -266,7 +275,7 @@ export function editLive(v) {
     for (const k of ['location', 'currency', 'sb', 'bb', 'tripId', 'condition']) if (v[k] !== undefined) a[k] = v[k];
     if (Array.isArray(v.buyins)) a.buyins = v.buyins;
     return a;
-  });
+  }, expectedId);
 }
 
 /** 終了して精算画面へ（タイマー停止） */
@@ -284,26 +293,30 @@ export function settleLive() {
 }
 
 /** 精算をやめてプレイに戻る（タイマー再開） */
-export function backToPlay() {
+export function backToPlay(expectedId) {
   return withActive((a) => {
     a.segments.push({ s: Date.now(), e: null });
     a.status = 'playing';
     a.endedAt = null;
     return a;
-  });
+  }, expectedId);
 }
 
-export function saveLiveDraft(draft) {
+/** 精算の下書き。画面を開いたときと同じモード・同じセッションにだけ書き込む */
+export function saveLiveDraft(draft, { activeId, gen }) {
   return commit((db) => {
-    if (db.active) db.active.draft = draft;
-  }, { silent: true });
+    if (db.active && db.active.id === activeId) db.active.draft = draft;
+  }, { silent: true, touch: false, gen });
 }
 
 /** 精算して保存。同じ進行中セッションから二重に保存されない（idで判定） */
-export function finishLive(v) {
+export function finishLive(v, expectedId) {
   return commit((db) => {
     const a = db.active;
-    if (!a) throw new UserError('進行中のセッションはありません（すでに保存済みの可能性があります）');
+    if (!a || (expectedId && a.id !== expectedId)) {
+      if (expectedId && db.sessions.some((x) => x.id === expectedId)) throw new ConflictError('このセッションは別の画面（タブ）ですでに保存されています。入力内容は残っています。');
+      throw new ConflictError(LIVE_CHANGED);
+    }
     let s = db.sessions.find((x) => x.id === a.id);
     if (!s) {
       const now = Date.now();
@@ -322,14 +335,14 @@ export function finishLive(v) {
   });
 }
 
-export function discardLive() {
-  return commit((db) => { db.active = null; });
+export function discardLive(expectedId) {
+  return withActive((a, db) => { db.active = null; }, expectedId);
 }
 
 /* ---------------- 入力途中の内容 ---------------- */
 
-export function setDraft(key, data) {
-  return commit((db) => { db.drafts[key] = { ...data, savedAt: Date.now() }; }, { silent: true });
+export function setDraft(key, data, { gen } = {}) {
+  return commit((db) => { db.drafts[key] = { ...data, savedAt: Date.now() }; }, { silent: true, touch: false, gen });
 }
 export function clearDraft(key) {
   const db = getDb();

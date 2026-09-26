@@ -1,7 +1,7 @@
 // タイマー：開始画面と進行中カード
 import { getDb } from '../store.js';
 import * as A from '../actions.js';
-import { parseNumber, esc, fmtElapsed, fmtAmount, fmtStake, fmtTimeInTz, fmtDuration, fmtInput, CURRENCY_CODES, toInputInTz, fromInputInTz, currentTz } from '../util.js';
+import { parseNumber, esc, fmtElapsed, fmtAmount, fmtStake, fmtTimeInTz, fmtDuration, fmtInput, CURRENCY_CODES, toInputInTz, fromInputInTz, isNonexistentLocalTime, currentTz } from '../util.js';
 import { header, icons, toast, showError, busy, confirmDialog, numberDialog } from '../ui.js';
 import {
   tripField, currencyField, textField, amountField, stakeFields, chipsHtml, readForm, showErrors, clearErrors,
@@ -234,7 +234,8 @@ export function renderLiveEdit(el) {
       const errors = { ...v.errors };
       delete errors.buyin;
       const t = fromInputInTz(raw.startedAt, tz);
-      if (!raw.startedAt || !Number.isFinite(t)) errors.startedAt = '開始時刻を入力してください';
+      if (isNonexistentLocalTime(raw.startedAt, tz)) errors.startedAt = 'その時刻は夏時間の切り替えで存在しません。前後の時刻を入力してください';
+      else if (!raw.startedAt || !Number.isFinite(t)) errors.startedAt = '開始時刻を入力してください';
       const buyins = [];
       a.buyins.forEach((b, i) => {
         const r = parseNumber(raw[`buyin_${i}`], { allowEmpty: true });
@@ -246,7 +247,7 @@ export function renderLiveEdit(el) {
       // 秒は元の値を保つ（分単位の入力で数十秒ずれないように）
       const startedAt = toLocalInput(a.startedAt) === raw.startedAt ? a.startedAt : t;
       try {
-        A.editLive({ ...v.value, buyin: undefined, startedAt, buyins });
+        A.editLive({ ...v.value, buyin: undefined, startedAt, buyins }, a.id);
         toast('プレイ中の情報を修正しました', { type: 'success' });
         location.hash = '#/';
       } catch (err) {
@@ -267,7 +268,7 @@ export function liveCardHtml(db) {
   const total = A.liveBuyinTotal(a);
   const statusLabel = a.status === 'playing' ? 'プレイ中' : a.status === 'break' ? '休憩中' : '精算入力中';
   return `
-    <section class="live-card status-${a.status}" aria-label="進行中のセッション">
+    <section class="live-card status-${esc(a.status)}" aria-label="進行中のセッション">
       <div class="live-top">
         <span class="live-status"><span class="pulse"></span>${statusLabel}</span>
         <span class="live-started">開始 ${esc(fmtTimeInTz(a.startedAt, a.tz))}${a.status !== 'settling' ? `<a class="live-edit" href="#/live/edit">${icons.edit}<span>修正</span></a>` : ''}</span>
@@ -327,7 +328,7 @@ export function bindLiveCard(root) {
     try {
       if (act === 'cond') {
         const v = Number(btn.dataset.v);
-        A.editLive({ condition: a.condition === v ? null : v });
+        A.editLive({ condition: a.condition === v ? null : v }, a.id);
       } else if (act === 'pause') await busy(btn, async () => { A.pauseLive(); });
       else if (act === 'resume') await busy(btn, async () => { A.resumeLive(); });
       else if (act === 'finish') {
@@ -342,15 +343,15 @@ export function bindLiveCard(root) {
           initial: last ? fmtInput(last) : '',
           confirmText: '追加',
           validate: (r) => (r.value > 0 ? null : '0より大きい額を入力してください'),
+          onSave: (value) => A.addBuyin(value, a.id),
         });
         if (!res) return;
-        A.addBuyin(res.value);
         toast(`${fmtAmount(res.value, a.currency)} を追加しました`, { type: 'success' });
       } else if (act === 'undo-buyin') {
         const lastB = a.buyins[a.buyins.length - 1];
         const ok = await confirmDialog({ title: 'バイインを取り消しますか？', message: `直前に記録した ${esc(fmtAmount(lastB.amount, a.currency))} を合計バイインから除きます。`, confirmText: '取り消す', danger: true });
         if (!ok) return;
-        A.removeLastBuyin();
+        A.removeLastBuyin(a.id);
       }
     } catch (err) {
       showError(err);

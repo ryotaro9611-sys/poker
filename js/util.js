@@ -94,7 +94,11 @@ export function ymdInTz(ms, tz) {
 export function toInputInTz(ms, tz) {
   try { const p = partsInTz(ms, tz); return `${p.y}-${pad(p.mo)}-${pad(p.d)}T${pad(p.h)}:${pad(p.mi)}`; } catch { return ''; }
 }
-/** datetime-local 入力値（記録したタイムゾーンの時刻）→ タイムスタンプ */
+/**
+ * datetime-local 入力値（記録したタイムゾーンの時刻）→ タイムスタンプ。
+ * 夏時間の切り替えで存在しない時刻は NaN（黙って1時間ずらさない）。
+ * 秋の切り替えで2回ある時刻は、早いほう（夏時間側）として扱う。
+ */
 export function fromInputInTz(value, tz) {
   const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(value || '');
   if (!m) return NaN;
@@ -102,10 +106,15 @@ export function fromInputInTz(value, tz) {
   try {
     let t = naive - tzOffsetMs(naive, tz);
     t = naive - tzOffsetMs(t, tz); // 夏時間の境目の補正
+    if (toInputInTz(t, tz) !== m[0]) return NaN; // 存在しない時刻
     return t;
   } catch {
     return new Date(value).getTime();
   }
+}
+/** 入力形式は正しいが、夏時間の切り替えで存在しない時刻か */
+export function isNonexistentLocalTime(value, tz) {
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(value || '') && Number.isNaN(fromInputInTz(value, tz));
 }
 
 export function currentTz() {
@@ -221,10 +230,25 @@ export function fmtInput(n) {
   return new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(Number(n));
 }
 
+/** 遅延実行。flush() は予約があるときだけ即実行する */
 export function debounce(fn, ms) {
-  let t;
-  const d = (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
-  d.flush = (...a) => { clearTimeout(t); fn(...a); };
-  d.cancel = () => clearTimeout(t);
+  let t = null;
+  let args = [];
+  const run = () => { t = null; fn(...args); };
+  const d = (...a) => { args = a; clearTimeout(t); t = setTimeout(run, ms); };
+  d.flush = () => { if (t != null) { clearTimeout(t); run(); } };
+  d.cancel = () => { clearTimeout(t); t = null; };
+  d.pending = () => t != null;
   return d;
+}
+
+/** 画面を離れる・アプリが裏に回る直前に実行する（戻り値で解除） */
+export function onLeave(fn) {
+  const onVis = () => { if (document.visibilityState === 'hidden') fn(); };
+  document.addEventListener('visibilitychange', onVis);
+  window.addEventListener('pagehide', fn);
+  return () => {
+    document.removeEventListener('visibilitychange', onVis);
+    window.removeEventListener('pagehide', fn);
+  };
 }

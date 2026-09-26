@@ -86,7 +86,8 @@ let current = null;
  */
 export function resolvePending({ only } = {}) {
   if (isDemo()) return Promise.resolve({ skipped: 'demo' });
-  if (current) return current;
+  // 取得中に新しい対象（日付の変更など）ができた場合は、終わってからもう一度取りにいく
+  if (current) return current.catch(() => {}).then(() => resolvePending({ only }));
   current = run(only).finally(() => {
     current = null;
     rateState.running = false;

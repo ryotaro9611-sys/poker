@@ -69,7 +69,9 @@ function tripCard(t, m) {
   const s = m.summary;
   const hourly = s.jpy.hourly;
   const be = m.breakEvenHourly;
-  const covered = hourly != null && be != null ? hourly >= be : null;
+  // 換算待ちがあると円の収支が確定しないため判定を保留。確定後はポーカー収支と経費を直接比べる
+  const pendingRates = s.jpy.pending > 0;
+  const covered = be == null || pendingRates || !s.count ? null : s.jpy.profit >= m.expenses;
   return `
     <a class="card trip-cmp" href="#/trips/${esc(t.id)}">
       <div class="trip-card-head">
@@ -94,7 +96,7 @@ function tripCard(t, m) {
         <div class="be-line ${covered ? 'ok' : covered === false ? 'ng' : ''}">
           <span>経費をまかなう時給</span>
           <b class="num">${esc(fmtHourly(be, 'JPY').replace(/^\+/, ''))}</b>
-          ${covered != null ? `<span class="be-tag">${covered ? '上回った' : '届かず'}</span>` : ''}
+          ${covered != null ? `<span class="be-tag">${covered ? '上回った' : '届かず'}</span>` : pendingRates ? '<span class="be-tag be-hold">換算待ちのため保留</span>' : ''}
         </div>` : ''}
       ${m.reasons.length ? `<p class="trip-note">${esc(m.reasons.join('・'))}のため暫定</p>` : ''}
     </a>`;

@@ -113,7 +113,7 @@ function renderChrome(route) {
     const label = a.status === 'playing' ? 'プレイ中' : a.status === 'break' ? '休憩中' : '精算入力中';
     mini.hidden = false;
     mini.innerHTML = `
-      <a class="livebar status-${a.status}" href="${a.status === 'settling' ? '#/live/finish' : '#/'}">
+      <a class="livebar status-${esc(a.status)}" href="${a.status === 'settling' ? '#/live/finish' : '#/'}">
         <span class="live-status"><span class="pulse"></span>${label}</span>
         <span class="livebar-time" data-tick="elapsed">${fmtElapsed(A.liveElapsedMs(a))}</span>
         <span class="livebar-info">${esc(a.location)} · ${esc(fmtStake(a.currency, a.sb, a.bb))}</span>
