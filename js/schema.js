@@ -263,7 +263,8 @@ function checkActive(a, tripIds, ctx) {
     condition: checkCondition(a.condition, ctx), draft: checkDraft(a.draft, ctx),
     rev: Number.isInteger(a.rev) && a.rev >= 0 ? a.rev : 0,
     ...(endedAt != null ? { endedAt } : {}),
-    ...(repairs.length ? { repairs } : {}),
+    // 修復履歴は10件まで（復元の検査と同じ上限）。新しいお知らせを残し、古いものから外す
+    ...(repairs.length ? { repairs: repairs.slice(-10) } : {}),
   };
 }
 

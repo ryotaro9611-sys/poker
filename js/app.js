@@ -151,12 +151,15 @@ function registerSW() {
     });
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update().catch(() => {}); });
   }).catch((e) => console.warn('SW登録に失敗', e));
-  // 新しい版に切り替わったとき（この画面か別のタブで「更新」を押した）だけ読み込み直す。
-  // 初めて開いたときにオフライン用の準備が整った場合にも同じ合図が来るが、そのときは読み込み直さない
-  const hadController = !!navigator.serviceWorker.controller;
+  // 新しい版に切り替わったとき（この画面か別のタブで「更新」を押した）に1回だけ読み込み直す。
+  // 初めて開いたときは、オフライン用の準備が整った瞬間にも同じ合図が来る。無視するのはその最初の1回だけ
+  // （その後に別のタブで更新された場合は、この画面も新しい版に切り替える）
+  let ignoreFirstClaim = !navigator.serviceWorker.controller;
   let reloading = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (!(hadController || updateRequested) || reloading) return;
+    if (ignoreFirstClaim && !updateRequested) { ignoreFirstClaim = false; return; }
+    ignoreFirstClaim = false;
+    if (reloading) return;
     reloading = true;
     location.reload();
   });

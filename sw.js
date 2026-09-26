@@ -1,5 +1,5 @@
 // オフライン用 Service Worker：アプリ本体を端末にキャッシュする（為替APIへの通信はキャッシュしない）
-const VERSION = 'v1.2.5';
+const VERSION = 'v1.2.6';
 const CACHE = `tripledger-${VERSION}`;
 const ASSETS = [
   './',

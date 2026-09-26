@@ -25,6 +25,11 @@ const server = http.createServer((req, res) => {
     res.end(fs.readFileSync(file, 'utf8').replace(/const VERSION = '[^']+';/, `const VERSION = '${swVersion}';`));
     return;
   }
+  if (p === '/js/views/settings.js' && swVersion) {
+    // 新しい版のアプリ本体（JS）も配信する：画面に出る版名を変える
+    res.end(fs.readFileSync(file, 'utf8').replace(/APP_VERSION = '[^']+'/, `APP_VERSION = '${swVersion}'`));
+    return;
+  }
   fs.createReadStream(file).pipe(res);
 });
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -615,6 +620,27 @@ test('更新：新しい版が出たら知らせ、「更新」で切り替わ�
     await waitFor(`!window.__oldPage && document.documentElement.classList.contains('ready')`, 10000, '新しい版で読み込み直す');
     await waitFor(`caches.keys().then((k) => k.length === 1 && k[0] === 'tripledger-v-test-next')`, 5000, '古いキャッシュの削除');
     assert((await data()).sessions.length === 1, '記録はそのまま');
+    await go('#/settings');
+    includes(await text(), 'TRIP LEDGER vv-test-next', '新しい版のアプリ本体（JS）で動いている');
+  } finally {
+    swVersion = null;
+  }
+});
+
+test('N1：初回訪問のまま残した画面も、別のタブで「更新」されたら新しい版に切り替わる', async () => {
+  await fresh();
+  await ev(`navigator.serviceWorker.getRegistrations().then((rs) => Promise.all(rs.map((r) => r.unregister()))).then(() => caches.keys()).then((ks) => Promise.all(ks.map((k) => caches.delete(k)))).then(() => 1)`);
+  await reload();
+  await waitFor(`navigator.serviceWorker.getRegistration().then((r) => !!(r && r.active) && !!navigator.serviceWorker.controller)`, 10000, '準備の完了');
+  try {
+    swVersion = 'v-test-other-tab';
+    await ev(`window.__oldPage = true; navigator.serviceWorker.getRegistration().then((r) => r.update()).then(() => 1)`);
+    await waitFor(`navigator.serviceWorker.getRegistration().then((r) => !!r.waiting)`, 10000, '新しい版の準備');
+    // 別のタブで「更新」を押したのと同じ操作（この画面の「更新」ボタンは押さない）
+    await ev(`navigator.serviceWorker.getRegistration().then((r) => { r.waiting.postMessage('SKIP_WAITING'); return 1; })`);
+    await waitFor(`!window.__oldPage && document.documentElement.classList.contains('ready')`, 10000, 'この画面も新しい版で読み込み直す');
+    await go('#/settings');
+    includes(await text(), 'TRIP LEDGER vv-test-other-tab', '新しい版のアプリ本体で動いている');
   } finally {
     swVersion = null;
   }
