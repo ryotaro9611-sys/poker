@@ -5,16 +5,18 @@ import { esc, fmtElapsed, fmtStake } from './util.js';
 import { icons, toast } from './ui.js';
 import * as A from './actions.js';
 import { renderHome } from './views/home.js';
-import { renderLiveStart, tickLive } from './views/live.js';
+import { renderLiveStart, renderLiveEdit, tickLive } from './views/live.js';
 import { renderSessionForm } from './views/sessionForm.js';
 import { renderSessionList, renderSessionDetail } from './views/sessions.js';
 import { renderStats } from './views/stats.js';
 import { renderTripList, renderTripDetail, renderTripForm } from './views/trips.js';
+import { renderTripCompare } from './views/tripCompare.js';
 import { renderSettings } from './views/settings.js';
 
 const routes = [
   { re: /^\/$/, tab: 'home', live: true, render: (el) => renderHome(el) },
   { re: /^\/live\/start$/, tab: 'home', form: true, render: (el) => renderLiveStart(el) },
+  { re: /^\/live\/edit$/, tab: 'home', form: true, render: (el) => renderLiveEdit(el) },
   { re: /^\/live\/finish$/, tab: 'home', form: true, render: (el) => renderSessionForm(el, { mode: 'finish' }) },
   { re: /^\/sessions$/, tab: 'sessions', live: true, render: (el) => renderSessionList(el) },
   { re: /^\/sessions\/new$/, tab: 'sessions', form: true, render: (el, m, q) => renderSessionForm(el, { mode: 'new', presetTrip: q.trip }) },
@@ -22,6 +24,7 @@ const routes = [
   { re: /^\/sessions\/([^/]+)$/, tab: 'sessions', live: true, render: (el, m) => renderSessionDetail(el, { id: m[1] }) },
   { re: /^\/stats$/, tab: 'stats', live: true, render: (el, m, q) => renderStats(el, { query: q }) },
   { re: /^\/trips$/, tab: 'trips', live: true, render: (el) => renderTripList(el) },
+  { re: /^\/trips\/compare$/, tab: 'trips', live: true, render: (el) => renderTripCompare(el) },
   { re: /^\/trips\/new$/, tab: 'trips', form: true, render: (el) => renderTripForm(el, {}) },
   { re: /^\/trips\/([^/]+)\/edit$/, tab: 'trips', form: true, render: (el, m) => renderTripForm(el, { id: m[1] }) },
   { re: /^\/trips\/([^/]+)$/, tab: 'trips', live: true, render: (el, m) => renderTripDetail(el, { id: m[1] }) },
@@ -172,6 +175,8 @@ function boot() {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
       tickLive(document);
+      // 画面復帰時に止め忘れの警告などを最新にする
+      if (store.getDb().active) rerenderIfLive();
       autoResolve();
     }
   });

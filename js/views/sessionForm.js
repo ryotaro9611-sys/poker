@@ -126,7 +126,7 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
           <div class="chips" data-loc-chips>${chipsHtml(A.recentLocations(db, 5).map((l) => ({ label: l, data: { location: l } })))}</div>
           ${currencyField(v.currency)}
           ${stakeFields(v.sb, v.bb)}
-          ${durationField(v.hours, v.mins, mode === 'finish' ? 'タイマーの計測値（休憩を除く）。補正する場合は書き換えてください。' : '')}
+          ${durationField(v.hours, v.mins, mode === 'finish' ? (a && A.liveElapsedMs(a, a.endedAt || Date.now()) > 12 * 3600e3 ? '<b class="warn-text">タイマーが12時間を超えています。止め忘れの場合は実際の実プレイ時間に直してください。</b>' : 'タイマーの計測値（休憩を除く）。補正する場合は書き換えてください。') : '')}
         </section>
 
         ${mode !== 'finish' ? `

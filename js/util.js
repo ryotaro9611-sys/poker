@@ -75,6 +75,39 @@ export function fmtTimeInTz(ms, tz) {
     return new Date(ms).toLocaleString('ja-JP');
   }
 }
+/** 指定タイムゾーンでの年月日時分 */
+function partsInTz(ms, tz) {
+  const f = new Intl.DateTimeFormat('en-US', { timeZone: tz || undefined, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+  const o = {};
+  for (const p of f.formatToParts(new Date(ms))) o[p.type] = p.value;
+  return { y: Number(o.year), mo: Number(o.month), d: Number(o.day), h: Number(o.hour) % 24, mi: Number(o.minute) };
+}
+function tzOffsetMs(ms, tz) {
+  const p = partsInTz(ms, tz);
+  return Date.UTC(p.y, p.mo - 1, p.d, p.h, p.mi) - Math.floor(ms / 60000) * 60000;
+}
+/** タイムスタンプ → 記録したタイムゾーンでの 'YYYY-MM-DD' */
+export function ymdInTz(ms, tz) {
+  try { const p = partsInTz(ms, tz); return `${p.y}-${pad(p.mo)}-${pad(p.d)}`; } catch { return ymdFromDate(new Date(ms)); }
+}
+/** タイムスタンプ → datetime-local 入力値（記録したタイムゾーンの時刻） */
+export function toInputInTz(ms, tz) {
+  try { const p = partsInTz(ms, tz); return `${p.y}-${pad(p.mo)}-${pad(p.d)}T${pad(p.h)}:${pad(p.mi)}`; } catch { return ''; }
+}
+/** datetime-local 入力値（記録したタイムゾーンの時刻）→ タイムスタンプ */
+export function fromInputInTz(value, tz) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(value || '');
+  if (!m) return NaN;
+  const naive = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]);
+  try {
+    let t = naive - tzOffsetMs(naive, tz);
+    t = naive - tzOffsetMs(t, tz); // 夏時間の境目の補正
+    return t;
+  } catch {
+    return new Date(value).getTime();
+  }
+}
+
 export function currentTz() {
   try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch { return ''; }
 }

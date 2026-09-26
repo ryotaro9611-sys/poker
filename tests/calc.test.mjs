@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { buildDemoDb } from '../js/demo.js';
 import {
   sessionProfit, sessionProfitJPY, sessionBB, summarize, tripResult, cumulativeSeries,
-  validateSession, validateTrip, groupSummaries, stakeKey,
+  validateSession, validateTrip, groupSummaries, stakeKey, extremes, maxDrawdown, tripMetrics,
 } from '../js/calc.js';
-import { parseNumber, fmtMoney, fmtYen, fmtBBph, addDaysYMD } from '../js/util.js';
+import { parseNumber, fmtMoney, fmtYen, fmtBBph, addDaysYMD, toInputInTz, fromInputInTz, ymdInTz } from '../js/util.js';
 
 const empty = () => ({ trips: [], sessions: [], active: null, drafts: {}, prefs: {}, rateCache: {} });
 const db = buildDemoDb(empty);
@@ -122,6 +122,58 @@ t('表示形式', () => {
   assert.equal(fmtBBph(3.75), '+3.75 bb/時');
   assert.equal(parseNumber('1,000.5').value, 1000.5);
   assert.equal(addDaysYMD('2026-03-01', -1), '2026-02-28');
+});
+
+t('最大の勝ち・負け', () => {
+  const e = extremes(S, 'JPY');
+  assert.equal(e.best.value, 41720);
+  assert.equal(e.best.session.date, '2026-04-04');
+  assert.equal(e.worst.value, -15000);
+  const usd = extremes(S, 'USD');
+  assert.equal(usd.best.value, 280);
+  assert.equal(usd.worst.value, -100);
+  assert.equal(extremes([S[0]], 'JPY').worst, null);
+});
+
+t('最大ドローダウン', () => {
+  const dd = maxDrawdown(S, 'JPY');
+  assert.equal(dd.amount, 15000);
+  assert.equal(dd.fromDate, '2026-04-01');
+  assert.equal(dd.toDate, '2026-04-02');
+  // 開始直後から負け続ける場合は0からの下げ
+  const losing = [S[1], { ...S[1], id: 'l2', date: '2026-04-03' }];
+  const d2 = maxDrawdown(losing, 'JPY');
+  assert.equal(d2.amount, 30000);
+  assert.equal(d2.fromDate, null);
+  assert.equal(maxDrawdown([S[0]], 'JPY'), null);
+});
+
+t('bb単位の推移', () => {
+  const ser = cumulativeSeries(S, 'BB');
+  close(ser.at(-1).cum, 108.5, '累計bb');
+  close(ser[0].cum, 48, '初日');
+});
+
+t('遠征の比較指標', () => {
+  const m = tripMetrics(db.trips[0], S, '2026-09-26');
+  assert.equal(m.days, 7);
+  close(m.breakEvenHourly, 6000 / 14, '必要時給');
+  const ongoing = tripMetrics({ ...db.trips[0], endDate: null }, S, '2026-04-05');
+  assert.equal(ongoing.days, 5);
+  assert.equal(ongoing.ongoing, true);
+  assert.equal(tripMetrics({ ...db.trips[0], expenses: null }, S, '2026-09-26').breakEvenHourly, null);
+});
+
+t('タイムゾーン：記録した現地時刻で表示・入力', () => {
+  const ms = Date.UTC(2026, 8, 25, 17, 54); // マニラ 9/26 01:54
+  assert.equal(toInputInTz(ms, 'Asia/Manila'), '2026-09-26T01:54');
+  assert.equal(ymdInTz(ms, 'Asia/Manila'), '2026-09-26');
+  assert.equal(ymdInTz(ms, 'America/Los_Angeles'), '2026-09-25');
+  for (const tz of ['Asia/Manila', 'Asia/Seoul', 'America/Los_Angeles', 'Asia/Tokyo']) {
+    assert.equal(fromInputInTz(toInputInTz(ms, tz), tz), ms, tz);
+  }
+  const dst = Date.UTC(2026, 2, 8, 11, 30); // ロサンゼルスの夏時間切替日
+  assert.equal(fromInputInTz(toInputInTz(dst, 'America/Los_Angeles'), 'America/Los_Angeles'), dst);
 });
 
 console.log(`\n${n} tests passed`);

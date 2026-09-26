@@ -99,30 +99,90 @@ export function sortSessions(list, dir = 1) {
 }
 
 /**
+ * 1セッションの値。mode: 'JPY'（円換算。換算待ちは null）/ 'BB'（獲得bb）/ 通貨コード（その通貨以外は null）
+ */
+export function sessionValue(s, mode) {
+  if (mode === 'JPY') return sessionProfitJPY(s);
+  if (mode === 'BB') return sessionBB(s);
+  return s.currency === mode ? sessionProfit(s) : null;
+}
+
+/**
  * 日付順の累積推移（期間の開始を0とする）。
- * mode: 'JPY'（円換算。換算待ちは除外）または通貨コード（その通貨のみ）
+ * mode: 'JPY'（円換算。換算待ちは除外）/ 'BB' / 通貨コード（その通貨のみ）
  */
 export function cumulativeSeries(sessions, mode) {
   const byDate = new Map();
   for (const s of sortSessions(sessions)) {
-    let v;
-    if (mode === 'JPY') {
-      v = sessionProfitJPY(s);
-      if (v == null) continue;
-    } else {
-      if (s.currency !== mode) continue;
-      v = sessionProfit(s);
-    }
+    const v = sessionValue(s, mode);
+    if (v == null) continue;
     const e = byDate.get(s.date) || { date: s.date, day: 0, count: 0 };
-    e.day = round2(e.day + v);
+    e.day = mode === 'BB' ? e.day + v : round2(e.day + v);
     e.count++;
     byDate.set(s.date, e);
   }
   let cum = 0;
   return [...byDate.values()].map((e) => {
-    cum = round2(cum + e.day);
-    return { ...e, cum };
+    cum = mode === 'BB' ? Math.round((cum + e.day) * 1e6) / 1e6 : round2(cum + e.day);
+    return { ...e, day: mode === 'BB' ? Math.round(e.day * 1e6) / 1e6 : e.day, cum };
   });
+}
+
+/** 最大の勝ち・最大の負け（勝ち/負けのセッションがなければ null） */
+export function extremes(sessions, mode) {
+  let best = null;
+  let worst = null;
+  for (const s of sessions) {
+    const v = sessionValue(s, mode);
+    if (v == null) continue;
+    if (v > 0 && (!best || v > best.value)) best = { session: s, value: v };
+    if (v < 0 && (!worst || v < worst.value)) worst = { session: s, value: v };
+  }
+  return { best, worst };
+}
+
+/**
+ * 最大ドローダウン：累計収支のピーク（開始時の0を含む）からの最大の下げ幅。
+ * セッション単位（日付・開始時刻順）で計算する。下げがなければ null。
+ */
+export function maxDrawdown(sessions, mode) {
+  let cum = 0;
+  let peak = 0;
+  let peakDate = null;
+  let best = null;
+  for (const s of sortSessions(sessions)) {
+    const v = sessionValue(s, mode);
+    if (v == null) continue;
+    cum = round2(cum + v);
+    if (cum > peak) { peak = cum; peakDate = s.date; }
+    const dd = round2(peak - cum);
+    if (dd > 0 && (!best || dd > best.amount)) best = { amount: dd, fromDate: peakDate, toDate: s.date, peak, trough: cum };
+  }
+  return best;
+}
+
+function daysBetween(a, b) {
+  const [y1, m1, d1] = a.split('-').map(Number);
+  const [y2, m2, d2] = b.split('-').map(Number);
+  return Math.round((Date.UTC(y2, m2 - 1, d2) - Date.UTC(y1, m1 - 1, d1)) / 86400000);
+}
+
+/**
+ * 遠征の比較用指標。
+ * days: 日数（終了日未定なら今日まで）、breakEvenHourly: 経費をまかなうのに必要だった円時給（経費 ÷ 実プレイ時間）
+ */
+export function tripMetrics(trip, sessions, today) {
+  const r = tripResult(trip, sessions);
+  const end = trip.endDate || (today >= trip.startDate ? today : trip.startDate);
+  const days = daysBetween(trip.startDate, end) + 1;
+  const hours = r.summary.minutes / 60;
+  return {
+    ...r,
+    days,
+    ongoing: !trip.endDate,
+    breakEvenHourly: r.expenses != null && hours > 0 ? r.expenses / hours : null,
+    hoursPerDay: days > 0 ? hours / days : null,
+  };
 }
 
 export function stakeKey(s) {

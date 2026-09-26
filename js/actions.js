@@ -1,6 +1,7 @@
 // データ操作（遠征・セッション・タイマー）。すべて store.commit 経由で原子的に保存する。
 import { commit, getDb, UserError } from './store.js';
-import { uid, todayYMD, ymdFromDate, currentTz } from './util.js';
+import { uid, todayYMD, ymdFromDate, ymdInTz, currentTz } from './util.js';
+import { MAX_MINUTES } from './calc.js';
 
 /* ---------------- 共通 ---------------- */
 
@@ -242,9 +243,27 @@ export function removeLastBuyin() {
     return a;
   });
 }
-export function updateLiveInfo(v) {
+/**
+ * プレイ中の情報を修正（場所・通貨・レート・遠征・バイイン内訳・開始時刻）。
+ * 開始時刻を変えるとプレイ日もその日付になる（開始の押し忘れ対策）。
+ */
+export function editLive(v) {
   return withActive((a) => {
-    Object.assign(a, v);
+    if (a.status === 'settling') throw new UserError('精算入力中です。精算画面で修正してください');
+    const now = Date.now();
+    if (v.startedAt != null && v.startedAt !== a.startedAt) {
+      const first = a.segments[0];
+      const limit = first.e ?? now;
+      if (v.startedAt >= limit) {
+        throw new UserError(first.e ? '開始時刻は最初の休憩より前にしてください' : '開始時刻は現在より前にしてください');
+      }
+      if (now - v.startedAt > MAX_MINUTES * 60000) throw new UserError('開始時刻は72時間以内にしてください');
+      first.s = v.startedAt;
+      a.startedAt = v.startedAt;
+      a.date = a.tz ? ymdInTz(v.startedAt, a.tz) : ymdFromDate(new Date(v.startedAt));
+    }
+    for (const k of ['location', 'currency', 'sb', 'bb', 'tripId']) if (v[k] !== undefined) a[k] = v[k];
+    if (Array.isArray(v.buyins)) a.buyins = v.buyins;
     return a;
   });
 }

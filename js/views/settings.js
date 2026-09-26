@@ -1,12 +1,13 @@
 // 設定：デモ、バックアップ、為替、データ管理、使い方
-import { getDb, isDemo, enterDemo, exitDemo, exportJson, importJson, wipeAll, requestPersist, status } from '../store.js';
+import { getDb, isDemo, enterDemo, exitDemo, importJson, wipeAll, requestPersist, status } from '../store.js';
 import { sessionRate } from '../calc.js';
 import { rateState } from '../rates.js';
-import { esc, todayYMD } from '../util.js';
-import { header, icons, toast, showError, confirmDialog, modal } from '../ui.js';
+import { esc } from '../util.js';
+import { backupNow, hasUnbackedChanges } from '../backup.js';
+import { header, icons, toast, showError, confirmDialog, modal, busy } from '../ui.js';
 import { pendingNotice, bindPendingNotice } from './sessions.js';
 
-export const APP_VERSION = '1.0.0';
+export const APP_VERSION = '1.1.0';
 
 export function renderSettings(el) {
   const db = getDb();
@@ -34,13 +35,16 @@ export function renderSettings(el) {
 
       <section class="card">
         <h3 class="card-title">データの保存とバックアップ</h3>
-        <p class="small muted">記録はこの端末のブラウザ内だけに保存されます。iPhoneでは<b>「ホーム画面に追加」して使う</b>と、データが消されにくくオフラインでも起動できます。機種変更や万一に備えて、ときどきバックアップを書き出してください。</p>
+        <p class="small muted">記録はこの端末のブラウザ内だけに保存されます。iPhoneでは<b>「ホーム画面に追加」して使う</b>と、データが消されにくくオフラインでも起動できます。機種変更や紛失に備えて、ときどきバックアップしてください。</p>
+        <div class="kv"><span class="k">最終バックアップ</span><span class="v">${db.prefs.lastBackupAt ? esc(new Date(db.prefs.lastBackupAt).toLocaleString('ja-JP')) : '<span class="badge badge-warn">未実施</span>'}</span></div>
+        ${db.prefs.lastBackupAt ? `<div class="kv"><span class="k">その後の変更</span><span class="v">${hasUnbackedChanges(db) ? '<span class="badge badge-warn">あり</span>' : 'なし'}</span></div>` : ''}
         <div class="kv"><span class="k">ホーム画面から起動</span><span class="v">${standalone ? 'はい' : 'いいえ（ブラウザで表示中）'}</span></div>
         <div class="kv"><span class="k">永続保存</span><span class="v" data-persist>確認中…</span></div>
         <div class="kv"><span class="k">保存件数</span><span class="v">遠征 ${getDb().trips.length}件 / 記録 ${getDb().sessions.length}件</span></div>
         ${status.notice ? `<div class="notice notice-warn">${icons.alert}<div>${esc(status.notice)}</div></div>` : ''}
         <div class="btn-col">
-          <button type="button" class="btn btn-ghost btn-block" data-act="export" ${isDemo() ? 'disabled' : ''}>${icons.download}<span>バックアップを書き出す（JSON）</span></button>
+          <button type="button" class="btn btn-primary btn-block" data-act="export" ${isDemo() ? 'disabled' : ''}>${icons.download}<span>今すぐバックアップ</span></button>
+          <p class="muted small">iPhoneでは共有シートが開きます。<b>「"ファイル"に保存」→ iCloud Drive</b> を選ぶと、機種変更後もそのファイルから復元できます。</p>
           <label class="btn btn-ghost btn-block ${isDemo() ? 'is-disabled' : ''}">${icons.upload}<span>バックアップから復元</span><input type="file" accept="application/json,.json" data-act="import" hidden ${isDemo() ? 'disabled' : ''}></label>
         </div>
         ${isDemo() ? '<p class="muted small">デモ中はバックアップ操作はできません。</p>' : ''}
@@ -95,18 +99,7 @@ export function renderSettings(el) {
       toast('通常利用に戻りました');
       location.hash = '#/';
     } else if (act === 'export') {
-      try {
-        const blob = new Blob([exportJson()], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `trip-ledger-backup-${todayYMD()}.json`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 4000);
-        toast('バックアップを書き出しました', { type: 'success' });
-      } catch (err) { showError(err); }
+      await runBackup(btn);
     } else if (act === 'wipe') {
       const ok = await confirmDialog({ title: 'すべてのデータを削除しますか？', message: `遠征${db.trips.length}件・記録${db.sessions.length}件${db.active ? '・進行中のセッション' : ''}を削除します。元に戻せません。`, confirmText: '次へ', danger: true });
       if (!ok) return;
@@ -130,6 +123,17 @@ export function renderSettings(el) {
       const text = await file.text();
       const r = importJson(text);
       toast(`復元しました（遠征${r.trips}件・記録${r.sessions}件）`, { type: 'success' });
+    } catch (err) { showError(err); }
+  });
+}
+
+/** バックアップ実行（ホームのお知らせからも使う） */
+export async function runBackup(btn) {
+  return busy(btn, async () => {
+    try {
+      const r = await backupNow();
+      if (r.cancelled) toast('バックアップを中止しました');
+      else toast(r.method === 'share' ? 'バックアップしました' : 'バックアップファイルを書き出しました', { type: 'success' });
     } catch (err) { showError(err); }
   });
 }

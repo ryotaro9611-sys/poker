@@ -5,6 +5,8 @@ import { summarize, tripResult, sortSessions, sessionRate } from '../calc.js';
 import { esc, fmtYen, fmtDuration, fmtBBph, fmtDateRange, fmtStake, fmtAmount, signClass, todayYMD, fmtDate } from '../util.js';
 import { icons, toast, showError, busy, emptyState } from '../ui.js';
 import { liveCardHtml, bindLiveCard, quickStartInfo } from './live.js';
+import { backupReminder, snoozeBackupReminder } from '../backup.js';
+import { runBackup } from './settings.js';
 import { sessionRow, pendingNotice, bindPendingNotice } from './sessions.js';
 
 function currentTrip(db) {
@@ -47,6 +49,7 @@ export function renderHome(el) {
   const recent = sortSessions(db.sessions, -1).slice(0, 3);
   const firstRun = !db.sessions.length && !db.trips.length && !a;
   const realActive = isDemo() && getRealDb() && getRealDb().active;
+  const reminder = backupReminder(db);
 
   el.innerHTML = `
     <header class="home-head">
@@ -74,6 +77,18 @@ export function renderHome(el) {
 
       ${draft ? `<a class="notice notice-info notice-link" href="#/sessions/new">${icons.edit}<div><b>入力途中の記録があります</b><span>タップして続きを入力</span></div><span class="chev">${icons.chevron}</span></a>` : ''}
       ${pending ? pendingNotice(pending) : ''}
+      ${reminder ? `
+        <div class="notice notice-info notice-backup">
+          ${icons.download}
+          <div>
+            <b>バックアップのおすすめ</b>
+            <span>${esc(reminder.reason)}記録はこのiPhoneの中にしかありません。</span>
+            <div class="btn-row">
+              <button type="button" class="btn btn-small btn-primary" data-act="backup">${icons.download}<span>今すぐバックアップ</span></button>
+              <button type="button" class="btn btn-small btn-ghost" data-act="snooze-backup">あとで</button>
+            </div>
+          </div>
+        </div>` : ''}
 
       ${firstRun ? emptyState({
         icon: 'trip',
@@ -109,6 +124,12 @@ export function renderHome(el) {
         toast('タイマーを開始しました', { type: 'success' });
       } catch (err) { showError(err); }
     });
+  });
+  el.querySelector('[data-act="backup"]')?.addEventListener('click', (e) => runBackup(e.currentTarget));
+  el.querySelector('[data-act="snooze-backup"]')?.addEventListener('click', () => {
+    try { snoozeBackupReminder(); } catch { /* 保存できなくても表示を消すだけ */ }
+    el.querySelector('.notice-backup')?.remove();
+    toast('3日後にもう一度お知らせします');
   });
   el.querySelector('[data-act="demo"]')?.addEventListener('click', () => { enterDemo(); toast('デモを表示しています（実データには影響しません）'); });
 }

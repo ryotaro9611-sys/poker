@@ -1,5 +1,5 @@
 // オフライン用 Service Worker：アプリ本体を端末にキャッシュする（為替APIへの通信はキャッシュしない）
-const VERSION = 'v1.0.0';
+const VERSION = 'v1.1.0';
 const CACHE = `tripledger-${VERSION}`;
 const ASSETS = [
   './',
@@ -15,6 +15,7 @@ const ASSETS = [
   './js/ui.js',
   './js/chart.js',
   './js/demo.js',
+  './js/backup.js',
   './js/views/fields.js',
   './js/views/home.js',
   './js/views/live.js',
@@ -23,6 +24,7 @@ const ASSETS = [
   './js/views/stats.js',
   './js/views/trips.js',
   './js/views/settings.js',
+  './js/views/tripCompare.js',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/apple-touch-icon.png',

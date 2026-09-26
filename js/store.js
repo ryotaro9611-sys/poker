@@ -115,9 +115,10 @@ const clone = (o) => JSON.parse(JSON.stringify(o));
  * 変更を適用して保存する。保存に失敗した場合は状態を一切変えずに SaveError を投げる。
  * 別タブでの変更を上書きしないよう、実データは保存直前に最新を読み直してから適用する。
  */
-export function commit(mutator, { silent = false } = {}) {
+export function commit(mutator, { silent = false, touch = !silent } = {}) {
   if (demo) {
     const next = clone(demoDb);
+    if (touch) next.lastChangeAt = Date.now();
     const result = mutator(next);
     demoDb = next;
     if (!silent) emit();
@@ -125,6 +126,8 @@ export function commit(mutator, { silent = false } = {}) {
   }
   const base = readReal();
   const next = clone(base);
+  // バックアップ後に変更があったかを判断するため、記録の変更時刻を残す（下書き保存などは除く）
+  if (touch) next.lastChangeAt = Date.now();
   const result = mutator(next);
   next.version = 1;
   try {

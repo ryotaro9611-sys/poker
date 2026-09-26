@@ -1,17 +1,19 @@
 // 成績：累計収支と推移グラフ／時給／bb/時間／遠征損益／場所・レート・遠征別の比較
 import { getDb, isDemo, enterDemo } from '../store.js';
 import {
-  summarize, tripResult, cumulativeSeries, groupSummaries, stakeKey, locationKey,
+  summarize, tripResult, cumulativeSeries, groupSummaries, stakeKey, locationKey, extremes, maxDrawdown,
 } from '../calc.js';
 import {
-  esc, fmtYen, fmtMoney, fmtDuration, fmtBB, fmtBBph, fmtHourly, fmtStake, fmtDate, signClass, todayYMD,
+  esc, fmtYen, fmtMoney, fmtDuration, fmtBB, fmtBBph, fmtHourly, fmtStake, fmtDate, fmtDateShort, signClass, todayYMD,
   CURRENCIES, CURRENCY_CODES,
 } from '../util.js';
 import { header, icons, emptyState, toast } from '../ui.js';
 import { mountChart } from '../chart.js';
 
 let chartCleanup = null;
-const state = { scope: 'all', from: '', to: '', tripId: '', view: 'YEN', compare: 'location' };
+const state = { scope: 'all', from: '', to: '', tripId: '', view: 'YEN', compare: 'location', chart: 'money', sort: 'time' };
+
+const SORTS = [['time', '時間'], ['profit', '収支'], ['hourly', '時給'], ['bbph', 'bb/時']];
 
 function scopeSessions(db) {
   if (state.scope === 'period') {
@@ -71,9 +73,13 @@ export function renderStats(el, { query } = {}) {
   const isYen = state.view === 'YEN';
   const target = isYen ? scoped : scoped.filter((s) => s.currency === state.view);
   const sum = summarize(target);
-  const series = cumulativeSeries(target, isYen ? 'JPY' : state.view);
+  const mode = isYen ? 'JPY' : state.view;
+  const bbChart = state.chart === 'bb';
+  const series = cumulativeSeries(target, bbChart ? 'BB' : mode);
   const unit = isYen ? '円' : state.view;
   const fmtV = (v) => (isYen ? fmtYen(v) : fmtMoney(v, state.view));
+  const ext = extremes(target, mode);
+  const dd = maxDrawdown(target, mode);
   const total = isYen ? sum.jpy.profit : (sum.byCurrency[state.view]?.profit ?? 0);
   const hourly = isYen ? sum.jpy.hourly : sum.byCurrency[state.view]?.hourly;
   const trips = [...db.trips].sort((a, b) => (a.startDate < b.startDate ? 1 : -1));
@@ -123,9 +129,16 @@ export function renderStats(el, { query } = {}) {
       </section>
 
       <section class="card">
-        <div class="card-title-row"><h3 class="card-title">収支の推移</h3><span class="muted small">${esc(cumLabel())}・開始を0として日ごとに累積</span></div>
+        <div class="card-title-row">
+          <h3 class="card-title">${bbChart ? '獲得bbの推移' : '収支の推移'}</h3>
+          <div class="seg seg-2 seg-mini" role="tablist" aria-label="グラフの単位">
+            <button type="button" role="tab" class="seg-btn ${!bbChart ? 'on' : ''}" aria-selected="${!bbChart}" data-chart-unit="money">${isYen ? '円' : esc(state.view)}</button>
+            <button type="button" role="tab" class="seg-btn ${bbChart ? 'on' : ''}" aria-selected="${bbChart}" data-chart-unit="bb">bb</button>
+          </div>
+        </div>
+        <p class="muted small chart-caption">${esc(cumLabel())}・開始を0として日ごとに累積${bbChart ? '。bbはレートの違いをならした単位で、' + (isYen ? '全通貨の記録（換算待ちも含む）' : `${esc(state.view)}建ての記録`) + 'をまとめています' : ''}</p>
         <div class="chart" data-chart></div>
-        ${isYen && sum.jpy.pending ? `<p class="muted small">換算待ち${sum.jpy.pending}件はグラフに含まれていません。</p>` : ''}
+        ${isYen && !bbChart && sum.jpy.pending ? `<p class="muted small">換算待ち${sum.jpy.pending}件はグラフに含まれていません。</p>` : ''}
       </section>
 
       <section class="card">
@@ -139,6 +152,17 @@ export function renderStats(el, { query } = {}) {
           <div class="stat"><span class="stat-k">勝ち / 負け</span><span class="stat-v">${sum.wins}勝 ${sum.losses}敗${sum.count - sum.wins - sum.losses ? ` ${sum.count - sum.wins - sum.losses}分` : ''}</span></div>
         </div>
         <p class="muted small">時給・bb/時間は、各セッションの値の平均ではなく「合計 ÷ 合計時間」で計算しています。</p>
+      </section>
+
+      <section class="card">
+        <h3 class="card-title">記録の振れ幅${isYen && sum.jpy.pending ? ' <small class="muted">換算待ちを除く</small>' : ''}</h3>
+        <div class="stat-grid">
+          ${extremeStat('最大の勝ち', ext.best, fmtV)}
+          ${extremeStat('最大の負け', ext.worst, fmtV)}
+          <div class="stat stat-wide2"><span class="stat-k">最大ドローダウン</span><span class="stat-v ${dd ? 'neg' : 'zero'}">${dd ? esc(fmtV(-dd.amount)) : '下げなし'}</span>${dd ? `<span class="stat-sub">${dd.fromDate ? `${esc(fmtDateShort(dd.fromDate))}の山` : '期間の開始'}から ${esc(fmtDateShort(dd.toDate))} まで</span>` : ''}</div>
+          <div class="stat"><span class="stat-k">平均プレイ時間</span><span class="stat-v">${esc(fmtDuration(sum.minutes / sum.count))}</span><span class="stat-sub">1セッションあたり</span></div>
+        </div>
+        <p class="muted small">最大ドローダウンは、累計収支がそれまでの最高値からどれだけ下がったかの最大値です（セッション単位）。</p>
       </section>
 
       ${isYen && Object.keys(sum.byCurrency).length ? `
@@ -161,16 +185,22 @@ export function renderStats(el, { query } = {}) {
           ${[['location', '場所別'], ['stake', 'レート別'], ['trip', '遠征別']].map(([k, l]) => `
             <button type="button" role="tab" class="seg-btn ${state.compare === k ? 'on' : ''}" aria-selected="${state.compare === k}" data-compare="${k}">${l}</button>`).join('')}
         </div>
+        <div class="sort-row" role="group" aria-label="並び順">
+          <span class="muted small">並び順</span>
+          ${SORTS.map(([k, l]) => `<button type="button" class="chip ${state.sort === k ? 'chip-on' : ''}" aria-pressed="${state.sort === k}" data-sort="${k}">${l}</button>`).join('')}
+        </div>
         ${compareList(db, target, isYen)}
       </section>
       `}
     </div>`;
 
   const chartEl = el.querySelector('[data-chart]');
-  if (chartEl) chartCleanup = mountChart(chartEl, series, { unit, format: fmtV, cumLabel: cumLabel() });
+  if (chartEl) chartCleanup = mountChart(chartEl, series, bbChart ? { unit: 'bb', format: fmtBB, cumLabel: cumLabel() } : { unit, format: fmtV, cumLabel: cumLabel() });
 
   const rerender = () => renderStats(el);
   el.querySelectorAll('[data-scope]').forEach((b) => b.addEventListener('click', () => { state.scope = b.dataset.scope; rerender(); }));
+  el.querySelectorAll('[data-chart-unit]').forEach((b) => b.addEventListener('click', () => { state.chart = b.dataset.chartUnit; rerender(); }));
+  el.querySelectorAll('[data-sort]').forEach((b) => b.addEventListener('click', () => { state.sort = b.dataset.sort; rerender(); }));
   el.querySelectorAll('[data-compare]').forEach((b) => b.addEventListener('click', () => { state.compare = b.dataset.compare; rerender(); }));
   el.querySelectorAll('[data-f]').forEach((i) => i.addEventListener('change', () => {
     const f = i.dataset.f;
@@ -218,7 +248,8 @@ function tripSection(db, target, isYen) {
             <div class="cmp-meta">ポーカー ${esc(fmtYen(r.summary.jpy.profit))}<span class="dot-sep">·</span>経費 ${r.expenses == null ? '未入力' : esc(fmtYen(-r.expenses))}${r.reasons.length ? `<span class="dot-sep">·</span>${esc(r.reasons.join('・'))}` : ''}</div>
           </a>`).join('')}
       </div>
-      ${results.length > 1 ? `<div class="kv kv-total"><span class="k">遠征損益の合計${anyProv ? '<span class="badge badge-warn">暫定</span>' : ''}</span><span class="v num ${signClass(totalNet)}">${esc(fmtYen(totalNet))}</span></div>` : ''}
+      ${results.length > 1 ? `<div class="kv kv-total"><span class="k">遠征損益の合計${anyProv ? '<span class="badge badge-warn">暫定</span>' : ''}</span><span class="v num ${signClass(totalNet)}">${esc(fmtYen(totalNet))}</span></div>
+      <a class="link small block-link" href="#/trips/compare">遠征を並べて比較する</a>` : ''}
     </section>`;
 }
 
@@ -236,15 +267,30 @@ function compareList(db, target, isYen) {
     });
   }
   if (!groups.length) return '<p class="muted small">記録がありません。</p>';
-  groups.sort((a, b) => b.summary.minutes - a.summary.minutes);
   const val = (g) => (isYen ? g.summary.jpy.profit : (g.summary.byCurrency[state.view]?.profit ?? 0));
+  const hourlyOf = (g) => (isYen ? g.summary.jpy.hourly : g.summary.byCurrency[state.view]?.hourly);
+  const key = {
+    time: (g) => g.summary.minutes,
+    profit: val,
+    hourly: hourlyOf,
+    bbph: (g) => g.summary.bbPerHour,
+  }[state.sort] || ((g) => g.summary.minutes);
+  // 値がないもの（換算待ちのみ等）は最後に
+  groups.sort((a, b) => {
+    const x = key(a);
+    const y = key(b);
+    if (x == null && y == null) return b.summary.minutes - a.summary.minutes;
+    if (x == null) return 1;
+    if (y == null) return -1;
+    return y - x || b.summary.minutes - a.summary.minutes;
+  });
   const maxAbs = Math.max(1, ...groups.map((g) => Math.abs(val(g))));
   return `
     <div class="cmp-list">
       ${groups.map((g) => {
         const s = g.summary;
         const v = val(g);
-        const hr = isYen ? s.jpy.hourly : s.byCurrency[state.view]?.hourly;
+        const hr = hourlyOf(g);
         const local = state.compare === 'stake' && isYen && g.currency !== 'JPY' ? s.byCurrency[g.currency] : null;
         const w = Math.round((Math.abs(v) / maxAbs) * 100);
         return `
@@ -262,6 +308,16 @@ function compareList(db, target, isYen) {
           </div>`;
       }).join('')}
     </div>
-    <p class="muted small">${state.compare === 'stake' ? '同じブラインド額でも通貨が違えば別のレートとして集計します。' : ''}時間の長い順に表示しています。</p>`;
+    <p class="muted small">${state.compare === 'stake' ? '同じブラインド額でも通貨が違えば別のレートとして集計します。' : ''}${{ time: '実プレイ時間の長い順', profit: '収支の多い順', hourly: '時給の高い順', bbph: 'bb/時間の高い順' }[state.sort]}に表示しています。</p>`;
 }
 
+
+function extremeStat(label, x, fmtV) {
+  if (!x) return `<div class="stat"><span class="stat-k">${label}</span><span class="stat-v zero">該当なし</span></div>`;
+  return `
+    <div class="stat">
+      <span class="stat-k">${label}</span>
+      <span class="stat-v ${signClass(x.value)}">${esc(fmtV(x.value))}</span>
+      <a class="stat-sub" href="#/sessions/${esc(x.session.id)}">${esc(fmtDateShort(x.session.date))} ${esc(x.session.location)}</a>
+    </div>`;
+}

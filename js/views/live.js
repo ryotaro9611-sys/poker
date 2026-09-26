@@ -1,7 +1,7 @@
 // タイマー：開始画面と進行中カード
 import { getDb } from '../store.js';
 import * as A from '../actions.js';
-import { parseNumber, esc, fmtElapsed, fmtAmount, fmtStake, fmtTimeInTz, fmtDuration, fmtInput, CURRENCY_CODES } from '../util.js';
+import { parseNumber, esc, fmtElapsed, fmtAmount, fmtStake, fmtTimeInTz, fmtDuration, fmtInput, CURRENCY_CODES, toInputInTz, fromInputInTz, currentTz } from '../util.js';
 import { header, icons, toast, showError, busy, confirmDialog, numberDialog } from '../ui.js';
 import {
   tripField, currencyField, textField, amountField, stakeFields, chipsHtml, readForm, showErrors, clearErrors,
@@ -112,6 +112,144 @@ export function quickStartInfo(db) {
   return { location: p.lastLocation, currency: cur, sb: st.sb, bb: st.bb, buyin, tripId: A.defaultTripId(db) || null };
 }
 
+/* ---------------- 止め忘れの警告 ---------------- */
+
+export const LONG_PLAY_MS = 12 * 3600e3;
+export const LONG_BREAK_MS = 2 * 3600e3;
+
+/** 止め忘れの可能性。{ kind: 'play'|'break', ms } または null */
+export function liveWarning(a, now = Date.now()) {
+  if (!a || a.status === 'settling') return null;
+  if (a.status === 'break') {
+    const last = a.segments[a.segments.length - 1];
+    const ms = last && last.e ? now - last.e : 0;
+    return ms > LONG_BREAK_MS ? { kind: 'break', ms } : null;
+  }
+  const ms = A.liveElapsedMs(a, now);
+  return ms > LONG_PLAY_MS ? { kind: 'play', ms } : null;
+}
+
+function liveWarningHtml(a) {
+  const w = liveWarning(a);
+  if (!w) return '';
+  const h = Math.floor(w.ms / 3600e3);
+  const msg = w.kind === 'play'
+    ? `<b>実プレイ時間が${h}時間を超えています。</b><span>タイマーの止め忘れではありませんか？ 終了して精算画面で実プレイ時間を実際の値に補正できます。</span>`
+    : `<b>休憩が${h}時間を超えています。</b><span>そのまま終了した場合は「終了して精算」、プレイに戻っていた場合は「再開」後に精算画面で実プレイ時間を補正してください。</span>`;
+  return `<div class="notice notice-warn live-warn" role="alert">${icons.alert}<div>${msg}</div></div>`;
+}
+
+/* ---------------- プレイ中の修正 ---------------- */
+
+
+export function renderLiveEdit(el) {
+  const db = getDb();
+  const a = db.active;
+  if (!a) { location.replace('#/'); return; }
+  if (a.status === 'settling') { location.replace('#/live/finish'); return; }
+  const firstEnd = a.segments[0].e;
+  const tz = a.tz || currentTz();
+  const toLocalInput = (ms) => toInputInTz(ms, tz);
+  const otherTz = a.tz && a.tz !== currentTz();
+  el.innerHTML = `
+    ${header({ title: 'プレイ中の情報を修正', back: '#/' })}
+    <div class="page">
+      <form class="form" novalidate autocomplete="off">
+        <div class="form-summary" role="alert" hidden></div>
+        <section class="card form-card">
+          <label class="field">
+            <span class="field-label">開始時刻${otherTz ? ` <small class="muted">${esc(a.tz)} の時刻</small>` : ''}</span>
+            <input class="input" type="datetime-local" name="startedAt" value="${toLocalInput(a.startedAt)}">
+            <div class="chips">
+              <button type="button" class="chip" data-shift="-15">−15分</button>
+              <button type="button" class="chip" data-shift="-30">−30分</button>
+              <button type="button" class="chip" data-shift="-60">−1時間</button>
+              <button type="button" class="chip" data-shift="15">＋15分</button>
+            </div>
+            <span class="field-hint">開始を押し忘れた場合は、実際に座った時刻に直してください。プレイ日も開始時刻の日付になります。${firstEnd ? '最初の休憩より後にはできません。' : ''}</span>
+            <span class="field-error" data-err="startedAt"></span>
+          </label>
+          ${textField({ name: 'location', label: '場所・店舗名', value: a.location, list: 'loc-list' })}
+          <datalist id="loc-list">${A.recentLocations(db, 20).map((l) => `<option value="${esc(l)}">`).join('')}</datalist>
+          ${currencyField(a.currency)}
+          ${stakeFields(fmtInput(a.sb), fmtInput(a.bb))}
+          ${tripField(db, a.tripId || '')}
+        </section>
+        <section class="card form-card">
+          <div class="field">
+            <span class="field-label">バイインの内訳</span>
+            <div class="buyin-list" data-buyins>
+              ${a.buyins.map((b, i) => `
+                <div class="buyin-item">
+                  <span class="buyin-time">${esc(fmtTimeInTz(b.at, a.tz))}</span>
+                  <span class="input-wrap"><input class="input num" type="text" inputmode="decimal" name="buyin_${i}" value="${fmtInput(b.amount)}" autocomplete="off" aria-label="${i + 1}回目のバイイン"><span class="input-suffix" data-unit>${esc(unitOf(a.currency))}</span></span>
+                </div>`).join('') || '<p class="muted small">バイインの記録はありません。ホームの「追加バイイン」から追加できます。</p>'}
+            </div>
+            <span class="field-hint">0または空欄にした行は削除されます。</span>
+            <span class="field-error" data-err="buyins"></span>
+          </div>
+        </section>
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary btn-block btn-lg" data-act="save">${icons.check}<span>修正を保存</span></button>
+          <a class="btn btn-ghost btn-block" href="#/">キャンセル</a>
+        </div>
+      </form>
+    </div>`;
+
+  const form = el.querySelector('form');
+  attachNumberFormatting(form);
+  const refresh = () => {
+    const c = form.querySelector('[name="currency"]:checked').value;
+    form.querySelectorAll('[data-unit]').forEach((u) => { u.textContent = unitOf(c); });
+    form.querySelector('[data-stake-chips]').innerHTML = chipsHtml(A.recentStakes(getDb(), c).map((x) => ({ label: `${x.sb}/${x.bb}`, data: { sb: x.sb, bb: x.bb } })));
+  };
+  form.addEventListener('change', (e) => { if (e.target.name === 'currency') refresh(); });
+  form.addEventListener('click', (e) => {
+    const chip = e.target.closest('[data-chip]');
+    if (chip) {
+      const d = JSON.parse(chip.dataset.chip);
+      form.sb.value = fmtInput(d.sb);
+      form.bb.value = fmtInput(d.bb);
+      return;
+    }
+    const sh = e.target.closest('[data-shift]');
+    if (sh) {
+      const cur = fromInputInTz(form.startedAt.value, tz);
+      if (Number.isFinite(cur)) form.startedAt.value = toLocalInput(cur + Number(sh.dataset.shift) * 60000);
+    }
+  });
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    busy(form.querySelector('[data-act="save"]'), async () => {
+      const raw = readForm(form);
+      const v = validateStart({ ...raw, buyin: '' });
+      const errors = { ...v.errors };
+      delete errors.buyin;
+      const t = fromInputInTz(raw.startedAt, tz);
+      if (!raw.startedAt || !Number.isFinite(t)) errors.startedAt = '開始時刻を入力してください';
+      const buyins = [];
+      a.buyins.forEach((b, i) => {
+        const r = parseNumber(raw[`buyin_${i}`], { allowEmpty: true });
+        if (!r.ok) errors.buyins = `${i + 1}回目：${r.error}`;
+        else if (r.value > 0) buyins.push({ amount: r.value, at: b.at });
+      });
+      if (Object.keys(errors).length) { showErrors(form, errors); return; }
+      clearErrors(form);
+      // 秒は元の値を保つ（分単位の入力で数十秒ずれないように）
+      const startedAt = toLocalInput(a.startedAt) === raw.startedAt ? a.startedAt : t;
+      try {
+        A.editLive({ ...v.value, buyin: undefined, startedAt, buyins });
+        toast('プレイ中の情報を修正しました', { type: 'success' });
+        location.hash = '#/';
+      } catch (err) {
+        if (err.name === 'UserError' && /開始時刻/.test(err.message)) showErrors(form, { startedAt: err.message });
+        else showError(err);
+      }
+    });
+  });
+  refresh();
+}
+
 /* ---------------- 進行中カード ---------------- */
 
 export function liveCardHtml(db) {
@@ -124,10 +262,11 @@ export function liveCardHtml(db) {
     <section class="live-card status-${a.status}" aria-label="進行中のセッション">
       <div class="live-top">
         <span class="live-status"><span class="pulse"></span>${statusLabel}</span>
-        <span class="live-started">開始 ${esc(fmtTimeInTz(a.startedAt, a.tz))}</span>
+        <span class="live-started">開始 ${esc(fmtTimeInTz(a.startedAt, a.tz))}${a.status !== 'settling' ? `<a class="live-edit" href="#/live/edit">${icons.edit}<span>修正</span></a>` : ''}</span>
       </div>
       <div class="live-elapsed" data-tick="elapsed">${fmtElapsed(A.liveElapsedMs(a))}</div>
       <div class="live-elapsed-label">実プレイ時間（休憩を除く）${a.status === 'break' ? `<span class="live-break">休憩 <b data-tick="break">${fmtElapsed(A.liveBreakMs(a))}</b></span>` : A.liveBreakMs(a) > 0 ? `<span class="live-break">休憩計 ${esc(fmtDuration(Math.round(A.liveBreakMs(a) / 60000)))}</span>` : ''}</div>
+      ${liveWarningHtml(a)}
       <div class="live-info">
         <div class="live-info-item"><span class="k">場所</span><span class="v">${esc(a.location)}</span></div>
         <div class="live-info-item"><span class="k">レート</span><span class="v">${esc(fmtStake(a.currency, a.sb, a.bb))}</span></div>

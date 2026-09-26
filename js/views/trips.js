@@ -13,7 +13,7 @@ export function renderTripList(el) {
   const trips = [...db.trips].sort((a, b) => (a.startDate < b.startDate ? 1 : -1));
   const loose = db.sessions.filter((s) => !s.tripId).length;
   el.innerHTML = `
-    ${header({ title: '遠征', right: `<a class="btn btn-small btn-primary" href="#/trips/new">${icons.plus}<span>新規</span></a>` })}
+    ${header({ title: '遠征', right: `${trips.length > 1 ? `<a class="btn btn-small btn-ghost" href="#/trips/compare">${icons.chart}<span>比較</span></a>` : ''}<a class="btn btn-small btn-primary" href="#/trips/new">${icons.plus}<span>新規</span></a>` })}
     <div class="page">
       ${trips.length ? trips.map((t) => tripSummaryCard(db, t)).join('') : emptyState({
         icon: 'trip',
