@@ -199,6 +199,7 @@ export function startLive(v) {
       segments: [{ s: now, e: null }],
       status: 'playing',
       buyins: v.buyin > 0 ? [{ amount: v.buyin, at: now }] : [],
+      condition: v.condition ?? null,
       draft: null,
     };
     rememberPrefs(db, { ...v, initialBuyin: v.buyin });
@@ -262,7 +263,7 @@ export function editLive(v) {
       a.startedAt = v.startedAt;
       a.date = a.tz ? ymdInTz(v.startedAt, a.tz) : ymdFromDate(new Date(v.startedAt));
     }
-    for (const k of ['location', 'currency', 'sb', 'bb', 'tripId']) if (v[k] !== undefined) a[k] = v[k];
+    for (const k of ['location', 'currency', 'sb', 'bb', 'tripId', 'condition']) if (v[k] !== undefined) a[k] = v[k];
     if (Array.isArray(v.buyins)) a.buyins = v.buyins;
     return a;
   });

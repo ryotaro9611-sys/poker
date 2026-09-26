@@ -9,6 +9,7 @@ import {
 } from '../util.js';
 import { header, icons, emptyState, toast } from '../ui.js';
 import { mountChart } from '../chart.js';
+import { TAGS, conditionLabel } from '../tags.js';
 
 let chartCleanup = null;
 const state = { scope: 'all', from: '', to: '', tripId: '', view: 'YEN', compare: 'location', chart: 'money', sort: 'time' };
@@ -181,14 +182,14 @@ export function renderStats(el, { query } = {}) {
 
       <section class="card">
         <h3 class="card-title">比較</h3>
-        <div class="seg seg-3" role="tablist" aria-label="比較の切り替え">
-          ${[['location', '場所別'], ['stake', 'レート別'], ['trip', '遠征別']].map(([k, l]) => `
+        <div class="seg seg-3 seg-wrap" role="tablist" aria-label="比較の切り替え">
+          ${[['location', '場所別'], ['stake', 'レート別'], ['trip', '遠征別'], ['condition', '冴え別'], ['tag', 'タグ別']].map(([k, l]) => `
             <button type="button" role="tab" class="seg-btn ${state.compare === k ? 'on' : ''}" aria-selected="${state.compare === k}" data-compare="${k}">${l}</button>`).join('')}
         </div>
-        <div class="sort-row" role="group" aria-label="並び順">
+        ${state.compare === 'condition' ? '' : `<div class="sort-row" role="group" aria-label="並び順">
           <span class="muted small">並び順</span>
           ${SORTS.map(([k, l]) => `<button type="button" class="chip ${state.sort === k ? 'chip-on' : ''}" aria-pressed="${state.sort === k}" data-sort="${k}">${l}</button>`).join('')}
-        </div>
+        </div>`}
         ${compareList(db, target, isYen)}
       </section>
       `}
@@ -260,13 +261,22 @@ function compareList(db, target, isYen) {
   } else if (state.compare === 'stake') {
     groups = groupSummaries(target, stakeKey, (s) => fmtStake(s.currency, s.sb, s.bb));
     groups.forEach((g) => { g.currency = g.sessions[0].currency; });
-  } else {
+  } else if (state.compare === 'trip') {
     groups = groupSummaries(target, (s) => s.tripId || 'none', (s) => {
       const t = s.tripId && db.trips.find((x) => x.id === s.tripId);
       return t ? t.name : '遠征なし';
     });
+  } else if (state.compare === 'condition') {
+    groups = groupSummaries(target, (s) => s.condition || 0, (s) => conditionLabel(s.condition));
+  } else {
+    // 1セッションに複数タグがあれば、それぞれのタグに数える
+    groups = [...TAGS.map((t) => ({ key: t.id, label: t.label, sessions: target.filter((s) => (s.tags || []).includes(t.id)) })),
+      { key: 'none', label: 'タグなし', sessions: target.filter((s) => !(s.tags || []).length) }]
+      .filter((g) => g.sessions.length)
+      .map((g) => ({ ...g, summary: summarize(g.sessions) }));
   }
   if (!groups.length) return '<p class="muted small">記録がありません。</p>';
+  const personal = state.compare === 'condition' || state.compare === 'tag';
   const val = (g) => (isYen ? g.summary.jpy.profit : (g.summary.byCurrency[state.view]?.profit ?? 0));
   const hourlyOf = (g) => (isYen ? g.summary.jpy.hourly : g.summary.byCurrency[state.view]?.hourly);
   const key = {
@@ -276,7 +286,10 @@ function compareList(db, target, isYen) {
     bbph: (g) => g.summary.bbPerHour,
   }[state.sort] || ((g) => g.summary.minutes);
   // 値がないもの（換算待ちのみ等）は最後に
-  groups.sort((a, b) => {
+  if (state.compare === 'condition') {
+    // 冴えは 5→1、未入力は最後
+    groups.sort((a, b) => (b.key || -1) - (a.key || -1));
+  } else groups.sort((a, b) => {
     const x = key(a);
     const y = key(b);
     if (x == null && y == null) return b.summary.minutes - a.summary.minutes;
@@ -285,7 +298,12 @@ function compareList(db, target, isYen) {
     return y - x || b.summary.minutes - a.summary.minutes;
   });
   const maxAbs = Math.max(1, ...groups.map((g) => Math.abs(val(g))));
+  const all = summarize(target);
+  const allHr = isYen ? all.jpy.hourly : all.byCurrency[state.view]?.hourly;
+  const tagged = target.filter((s) => (state.compare === 'condition' ? s.condition : (s.tags || []).length)).length;
   return `
+    ${personal ? `<div class="cmp-base"><span>全体</span><span class="num">${esc(fmtHourly(allHr, isYen ? 'JPY' : state.view))}<span class="dot-sep">·</span>${esc(fmtBBph(all.bbPerHour))}</span></div>` : ''}
+    ${personal && !tagged ? `<p class="muted small">${state.compare === 'condition' ? '「今日の冴え」は、プレイ開始画面か進行中カードで入力できます。' : 'タグは精算画面で付けられます。'}</p>` : ''}
     <div class="cmp-list">
       ${groups.map((g) => {
         const s = g.summary;
@@ -296,7 +314,7 @@ function compareList(db, target, isYen) {
         return `
           <div class="cmp-row">
             <div class="cmp-main">
-              <span class="cmp-name">${esc(g.label)}</span>
+              <span class="cmp-name">${esc(g.label)}${personal && s.count < 5 ? '<span class="badge badge-muted">参考</span>' : ''}</span>
               <span class="cmp-amt ${signClass(v)}">${esc(isYen ? fmtYen(v) : fmtMoney(v, state.view))}</span>
             </div>
             <div class="cmp-bar"><span class="${signClass(v)}" style="width:${w}%"></span></div>
@@ -308,7 +326,7 @@ function compareList(db, target, isYen) {
           </div>`;
       }).join('')}
     </div>
-    <p class="muted small">${state.compare === 'stake' ? '同じブラインド額でも通貨が違えば別のレートとして集計します。' : ''}${{ time: '実プレイ時間の長い順', profit: '収支の多い順', hourly: '時給の高い順', bbph: 'bb/時間の高い順' }[state.sort]}に表示しています。</p>`;
+    <p class="muted small">${state.compare === 'stake' ? '同じブラインド額でも通貨が違えば別のレートとして集計します。' : ''}${state.compare === 'tag' ? '複数のタグが付いたセッションは、それぞれのタグに数えます。' : ''}${personal ? '5件未満のグループは件数が少なく、差が偶然の可能性があるため「参考」と表示しています。' : ''}${state.compare === 'condition' ? '冴えの高い順に表示しています。' : `${{ time: '実プレイ時間の長い順', profit: '収支の多い順', hourly: '時給の高い順', bbph: 'bb/時間の高い順' }[state.sort]}に表示しています。`}</p>`;
 }
 
 

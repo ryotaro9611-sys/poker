@@ -591,3 +591,32 @@ a.stat-sub { color: var(--text-2); text-decoration: underline; text-decoration-c
   .stat-grid-3col { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 .notice .btn span { color: inherit; font-size: inherit; }
+
+/* ---------- v1.2 冴え・タグ ---------- */
+.seg-5 { grid-template-columns: repeat(5, 1fr); }
+.cond-seg .seg-item span { min-height: 54px; }
+.cond-seg .seg-item b { font-size: 17px; }
+.cond-seg .seg-item small { display: block !important; font-size: 10px; }
+.cond-clear { align-self: flex-start; margin-top: 2px; color: var(--text-3); text-decoration: underline; text-underline-offset: 3px; }
+.tag-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.tag-chip { position: relative; }
+.tag-chip input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.tag-chip span { display: inline-flex; align-items: center; min-height: 40px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--line-2); background: rgba(255, 255, 255, 0.03); color: var(--text-2); font-size: 14px; }
+.tag-chip input:checked + span { background: var(--accent-soft); color: var(--accent); border-color: rgba(205, 178, 124, 0.5); }
+.tag-chip input:checked + span::before { content: "✓"; margin-right: 5px; font-weight: 700; }
+.tag-chip input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 1px; }
+.live-cond { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.live-cond .cond-mini { justify-content: space-between; }
+.live-cond .cond-dot { width: 100%; max-width: 52px; }
+.live-cond .k { font-size: 11px; color: var(--text-3); letter-spacing: 0.06em; }
+.live-cond .k small { color: var(--accent-2); }
+.cond-mini { display: flex; gap: 6px; }
+.cond-dot { width: 38px; height: 38px; border-radius: 50%; border: 1px solid var(--line-2); background: rgba(255, 255, 255, 0.03); color: var(--text-2); font-family: var(--font-num); font-size: 15px; font-weight: 600; cursor: pointer; }
+.cond-dot.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.cond-badge { display: inline-flex; padding: 1px 9px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 13px; font-weight: 600; }
+.seg-wrap .seg-btn { min-height: 36px; }
+.cmp-base { display: flex; justify-content: space-between; gap: 10px; padding: 8px 12px; margin-top: 8px; border-radius: 10px; background: rgba(255, 255, 255, 0.03); font-size: 12.5px; color: var(--text-2); }
+.cmp-base .num { color: var(--text); }
+@media (max-width: 380px) {
+  .cond-dot { width: 34px; height: 34px; }
+}

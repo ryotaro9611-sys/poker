@@ -176,4 +176,13 @@ t('タイムゾーン：記録した現地時刻で表示・入力', () => {
   assert.equal(fromInputInTz(toInputInTz(dst, 'America/Los_Angeles'), 'America/Los_Angeles'), dst);
 });
 
+t('冴え・タグの入力検証', () => {
+  const ok = { date: '2026-04-01', location: 'A', currency: 'USD', sb: '2', bb: '5', hours: '5', mins: '', buyin: '500', cashout: '0', timeRake: '' };
+  assert.equal(validateSession(ok).value.condition, null);
+  assert.deepEqual(validateSession(ok).value.tags, []);
+  assert.equal(validateSession({ ...ok, condition: '4' }).value.condition, 4);
+  assert.equal(validateSession({ ...ok, condition: '9' }).value.condition, null);
+  assert.deepEqual(validateSession({ ...ok, tags: ['tilt', 'unknown', 'loose', 'loose'] }).value.tags, ['loose', 'tilt']);
+});
+
 console.log(`\n${n} tests passed`);

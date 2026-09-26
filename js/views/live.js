@@ -5,8 +5,9 @@ import { parseNumber, esc, fmtElapsed, fmtAmount, fmtStake, fmtTimeInTz, fmtDura
 import { header, icons, toast, showError, busy, confirmDialog, numberDialog } from '../ui.js';
 import {
   tripField, currencyField, textField, amountField, stakeFields, chipsHtml, readForm, showErrors, clearErrors,
-  attachNumberFormatting, unitOf,
+  attachNumberFormatting, unitOf, conditionField, bindConditionClear,
 } from './fields.js';
+import { CONDITIONS, normalizeCondition } from '../tags.js';
 
 /* ---------------- 開始画面 ---------------- */
 
@@ -30,6 +31,9 @@ export function renderLiveStart(el) {
           ${amountField({ name: 'buyin', label: '最初のバイイン', value: bi != null ? fmtInput(bi) : '', unit: unitOf(cur), hint: 'リバイ・追加購入はプレイ中に追加できます' })}
           ${tripField(db, A.defaultTripId(db))}
         </section>
+        <section class="card form-card">
+          ${conditionField(null, { hint: '座る前の感覚で選んでください。成績タブで冴え別の成績を比べられます。' })}
+        </section>
         <div class="form-actions">
           <button type="submit" class="btn btn-primary btn-block btn-xl" data-act="start">${icons.play}<span>タイマーを開始</span></button>
           <a class="btn btn-ghost btn-block" href="#/">キャンセル</a>
@@ -39,6 +43,7 @@ export function renderLiveStart(el) {
 
   const form = el.querySelector('form');
   attachNumberFormatting(form);
+  bindConditionClear(form);
   const refresh = () => {
     const c = form.querySelector('[name="currency"]:checked').value;
     form.querySelectorAll('[data-unit]').forEach((u) => { u.textContent = unitOf(c); });
@@ -99,6 +104,7 @@ function validateStart(raw) {
   if (value.sb != null && value.bb != null && value.sb > value.bb) errors.sb = 'SBはBB以下にしてください';
   const bi = parseNumber(raw.buyin, { allowEmpty: true });
   if (!bi.ok) errors.buyin = bi.error; else value.buyin = bi.value || 0;
+  value.condition = normalizeCondition(raw.condition);
   return { ok: !Object.keys(errors).length, errors, value };
 }
 
@@ -174,6 +180,7 @@ export function renderLiveEdit(el) {
           ${currencyField(a.currency)}
           ${stakeFields(fmtInput(a.sb), fmtInput(a.bb))}
           ${tripField(db, a.tripId || '')}
+          ${conditionField(a.condition)}
         </section>
         <section class="card form-card">
           <div class="field">
@@ -198,6 +205,7 @@ export function renderLiveEdit(el) {
 
   const form = el.querySelector('form');
   attachNumberFormatting(form);
+  bindConditionClear(form);
   const refresh = () => {
     const c = form.querySelector('[name="currency"]:checked').value;
     form.querySelectorAll('[data-unit]').forEach((u) => { u.textContent = unitOf(c); });
@@ -281,6 +289,13 @@ export function liveCardHtml(db) {
         ${a.status !== 'settling' ? `<button type="button" class="btn btn-small btn-ghost" data-live="add-buyin">${icons.plus}<span>追加バイイン</span></button>` : ''}
       </div>
       ${a.status !== 'settling' && a.buyins.length ? `<button type="button" class="link live-undo" data-live="undo-buyin">直前のバイイン（${esc(fmtAmount(a.buyins[a.buyins.length - 1].amount, a.currency))}）を取り消す</button>` : ''}
+      ${a.status !== 'settling' ? `
+        <div class="live-cond">
+          <span class="k">今日の冴え${a.condition ? '' : '<small>（座る前に）</small>'}</span>
+          <div class="cond-mini" role="group" aria-label="今日の冴え">
+            ${CONDITIONS.map((c) => `<button type="button" class="cond-dot ${a.condition === c.value ? 'on' : ''}" data-live="cond" data-v="${c.value}" aria-pressed="${a.condition === c.value}" title="${esc(c.label)}">${c.value}</button>`).join('')}
+          </div>
+        </div>` : ''}
       <div class="live-actions">
         ${a.status === 'settling'
     ? `<a class="btn btn-primary btn-lg btn-block" href="#/live/finish">${icons.check}<span>精算入力を続ける</span></a>`
@@ -310,7 +325,10 @@ export function bindLiveCard(root) {
     const a = getDb().active;
     if (!a) return;
     try {
-      if (act === 'pause') await busy(btn, async () => { A.pauseLive(); });
+      if (act === 'cond') {
+        const v = Number(btn.dataset.v);
+        A.editLive({ condition: a.condition === v ? null : v });
+      } else if (act === 'pause') await busy(btn, async () => { A.pauseLive(); });
       else if (act === 'resume') await busy(btn, async () => { A.resumeLive(); });
       else if (act === 'finish') {
         await busy(btn, async () => { A.settleLive(); location.hash = '#/live/finish'; });

@@ -1,5 +1,6 @@
 // 成績計算（純粋関数のみ。UI・保存処理に依存しない）
 import { CURRENCY_CODES, isValidYMD, parseNumber } from './util.js';
+import { normalizeCondition, normalizeTags } from './tags.js';
 
 const round2 = (x) => Math.round(x * 100) / 100;
 
@@ -257,6 +258,8 @@ export function validateSession(raw) {
 
   v.tripId = raw.tripId || null;
   v.note = String(raw.note ?? '').trim().slice(0, 500);
+  v.condition = normalizeCondition(raw.condition);
+  v.tags = normalizeTags(raw.tags);
 
   return { ok: Object.keys(errors).length === 0, errors, value: v };
 }

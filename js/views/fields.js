@@ -1,5 +1,6 @@
 // フォーム部品の共通化
 import { CURRENCIES, CURRENCY_CODES, esc, fmtDateRange, fmtNum, $$ } from '../util.js';
+import { CONDITIONS, TAGS } from '../tags.js';
 
 export function tripOptions(db, selected) {
   const trips = [...db.trips].sort((a, b) => (a.startDate < b.startDate ? 1 : -1));
@@ -91,7 +92,55 @@ export function readForm(form) {
   const fd = new FormData(form);
   const o = {};
   for (const [k, v] of fd.entries()) o[k] = typeof v === 'string' ? v : '';
+  if (form.querySelector('[name="tags"]')) o.tags = fd.getAll('tags').map(String);
+  if (form.querySelector('[name="condition"]')) o.condition = String(fd.get('condition') || '');
   return o;
+}
+
+/** 今日の冴え（5段階・任意） */
+export function conditionField(value, { hint = '' } = {}) {
+  const v = value == null ? '' : String(value);
+  return `
+    <fieldset class="field">
+      <legend class="field-label">今日の冴え <small class="muted">座る前の自己評価・任意</small></legend>
+      <div class="seg seg-5 cond-seg" role="radiogroup">
+        ${CONDITIONS.map((c) => `
+          <label class="seg-item">
+            <input type="radio" name="condition" value="${c.value}" ${v === String(c.value) ? 'checked' : ''}>
+            <span><b>${c.value}</b><small>${esc(c.label)}</small></span>
+          </label>`).join('')}
+      </div>
+      <button type="button" class="link small cond-clear" data-cond-clear ${v ? '' : 'hidden'}>未入力に戻す</button>
+      ${hint ? `<span class="field-hint">${hint}</span>` : ''}
+    </fieldset>`;
+}
+
+/** タグ（選択式・複数可） */
+export function tagsField(selected = []) {
+  const set = new Set(selected || []);
+  return `
+    <fieldset class="field">
+      <legend class="field-label">タグ <small class="muted">当てはまるものだけ・任意</small></legend>
+      <div class="tag-chips">
+        ${TAGS.map((t) => `
+          <label class="tag-chip" title="${esc(t.hint)}">
+            <input type="checkbox" name="tags" value="${t.id}" ${set.has(t.id) ? 'checked' : ''}>
+            <span>${esc(t.label)}</span>
+          </label>`).join('')}
+      </div>
+    </fieldset>`;
+}
+
+/** 冴えの「未入力に戻す」 */
+export function bindConditionClear(form, onChange) {
+  const btn = form.querySelector('[data-cond-clear]');
+  if (!btn) return;
+  form.addEventListener('change', (e) => { if (e.target.name === 'condition') btn.hidden = false; });
+  btn.addEventListener('click', () => {
+    form.querySelectorAll('[name="condition"]').forEach((r) => { r.checked = false; });
+    btn.hidden = true;
+    if (onChange) onChange();
+  });
 }
 
 export function clearErrors(form) {

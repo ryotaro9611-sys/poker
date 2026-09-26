@@ -35,6 +35,7 @@ iPhone では Safari で開いて **共有 →「ホーム画面に追加」** �
 | `js/chart.js` | 累積収支グラフ（SVG、外部ライブラリなし） |
 | `js/views/*` | 各画面 |
 | `sw.js` | オフライン用キャッシュ（更新時は `VERSION` を上げる） |
+| `js/tags.js` | 今日の冴え（5段階）とタグの定義 |
 | `js/backup.js` | バックアップ（共有シート→「ファイル」へ保存）とお知らせ |
 | `js/views/tripCompare.js` | 遠征の比較画面 |
 | `tests/calc.test.mjs` | 計算ルールとデモ期待値のテスト |

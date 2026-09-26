@@ -19,6 +19,12 @@ const ROWS = [
   ['b', '2026-05-08', 'Room E', 'JPY', 100, 200, 20000, 18000, 0, 2, 1],
 ];
 
+// 冴え・タグ（成績の数値には影響しない）
+const DEMO_REVIEW = [
+  [4, ['loose']], [2, ['tired']], [5, []], [3, ['tight']],
+  [4, ['loose']], [2, ['tired', 'tilt']], [5, ['loose', 'alcohol']], [3, []],
+];
+
 export function buildDemoDb(emptyDb) {
   const db = emptyDb();
   const t0 = Date.UTC(2026, 3, 1);
@@ -37,6 +43,8 @@ export function buildDemoDb(emptyDb) {
     minutes: r[9] * 60,
     rate: r[3] === 'JPY' ? null : { value: r[10], date: r[1], source: DEMO_SOURCE, manual: false, demo: true },
     note: '',
+    condition: DEMO_REVIEW[i][0],
+    tags: DEMO_REVIEW[i][1],
     createdAt: t0 + 100 + i,
     updatedAt: t0 + 100 + i,
   }));

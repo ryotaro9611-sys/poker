@@ -219,6 +219,74 @@ test('タイマー：連打しても1件、休憩中の再読み込み、追加�
   includes(await text(), '+28,750円');
 });
 
+test('冴えとタグ：開始時に冴え、進行中カードで変更、精算でタグ、詳細に表示', async () => {
+  await fresh();
+  rateMode = 'ok';
+  await go('#/live/start');
+  await setVal('[name=location]', 'Cond Club');
+  await click('input[name=currency][value=JPY]');
+  await setVal('[name=sb]', '100'); await setVal('[name=bb]', '200'); await setVal('[name=buyin]', '10000');
+  await click('input[name=condition][value="4"]');
+  await click('[data-act=start]');
+  await waitFor(`location.hash === '#/' && document.querySelector('.live-card')`);
+  assert((await data()).active.condition === 4, '開始時の冴え');
+  await click('.cond-dot[data-v="2"]');
+  await waitFor(`document.querySelector('.cond-dot.on')?.dataset.v === '2'`);
+  assert((await data()).active.condition === 2, '進行中カードで変更');
+  await click('.cond-dot[data-v="2"]');
+  await waitFor(`!document.querySelector('.cond-dot.on')`);
+  assert((await data()).active.condition === null, 'もう一度押すと未入力');
+  await click('.cond-dot[data-v="5"]');
+  await waitFor(`document.querySelector('.cond-dot.on')?.dataset.v === '5'`);
+  await click('[data-live=finish]');
+  await waitFor(`document.querySelector('[name=cashout]')`);
+  assert(await ev(`document.querySelector('input[name=condition][value="5"]').checked`), '精算画面に冴えが引き継がれる');
+  await setVal('[name=cashout]', '15000');
+  await click('input[name=tags][value=loose]');
+  await click('input[name=tags][value=alcohol]');
+  await sleep(500);
+  await reload();
+  assert(await ev(`document.querySelector('input[name=tags][value=alcohol]').checked`), 'タグも下書きに残る');
+  await click('[data-act=save]');
+  await waitFor(`/^#\\/sessions\\//.test(location.hash)`);
+  const s = (await data()).sessions[0];
+  assert(s.condition === 5 && s.tags.join() === 'loose,alcohol', `保存内容 ${s.condition} ${s.tags}`);
+  const t = await text();
+  includes(t, '5 冴えてる'); includes(t, 'ルース卓'); includes(t, '飲酒あり');
+  // 編集でタグを外す・冴えを未入力に戻す
+  await go(`#/sessions/${s.id}/edit`);
+  await waitFor(`document.querySelector('input[name=tags][value=loose]')`);
+  await click('input[name=tags][value=loose]');
+  await click('[data-cond-clear]');
+  await click('[data-act=save]');
+  await waitFor(`!location.hash.endsWith('/edit')`);
+  const s2 = (await data()).sessions[0];
+  assert(s2.condition === null && s2.tags.join() === 'alcohol', '編集の反映');
+});
+
+test('冴え別・タグ別の比較（デモ）', async () => {
+  await fresh();
+  await ev(`sessionStorage.setItem('tripledger:demo', '1')`);
+  await reload();
+  await go('#/stats');
+  await click('[data-scope=all]');
+  await setVal('[data-f=view]', 'YEN');
+  await click('[data-compare=condition]');
+  let names = await ev(`[...document.querySelector('.seg-wrap').parentElement.querySelectorAll('.cmp-name')].map((e) => e.firstChild.textContent.trim())`);
+  assert(names.join() === '5 冴えてる,4 良い,3 普通,2 低め', `冴え順: ${names}`);
+  let t = await text();
+  includes(t, '+54,920円'); // 冴え5：41,720 + 13,200
+  includes(t, '参考');
+  includes(t, '全体');
+  await click('[data-compare=tag]');
+  t = await text();
+  includes(t, 'ルース卓'); includes(t, '+54,200円'); // 36,000 + 5,000 + 13,200
+  includes(t, 'タグなし');
+  includes(t, 'それぞれのタグに数えます');
+  await click('[data-compare=location]');
+  await ev(`sessionStorage.clear()`);
+});
+
 test('止め忘れ：12時間超のプレイと2時間超の休憩で警告', async () => {
   await fresh();
   const now = Date.now();

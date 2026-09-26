@@ -9,6 +9,7 @@ import {
 } from '../util.js';
 import { header, icons, toast, showError, busy, confirmDialog, numberDialog, emptyState } from '../ui.js';
 import { unitOf } from './fields.js';
+import { conditionLabel, tagLabel } from '../tags.js';
 
 export function yenLine(s) {
   if (s.currency === 'JPY') return '';
@@ -207,6 +208,8 @@ export function renderSessionDetail(el, { id }) {
       <section class="card">
         <h3 class="card-title">その他</h3>
         <div class="kv"><span class="k">遠征</span><span class="v">${trip ? `<a href="#/trips/${esc(trip.id)}">${esc(trip.name)}</a>` : '遠征なし'}</span></div>
+        <div class="kv"><span class="k">今日の冴え</span><span class="v">${s.condition ? `<span class="cond-badge c${s.condition}">${esc(conditionLabel(s.condition))}</span>` : '<span class="muted">未入力</span>'}</span></div>
+        <div class="kv"><span class="k">タグ</span><span class="v">${s.tags && s.tags.length ? s.tags.map((t) => `<span class="tag">${esc(tagLabel(t))}</span>`).join(' ') : '<span class="muted">なし</span>'}</span></div>
         ${s.startedAt ? `
           <div class="kv"><span class="k">開始</span><span class="v">${esc(fmtTimeInTz(s.startedAt, s.tz))}</span></div>
           <div class="kv"><span class="k">終了</span><span class="v">${esc(fmtTimeInTz(s.endedAt, s.tz))}</span></div>

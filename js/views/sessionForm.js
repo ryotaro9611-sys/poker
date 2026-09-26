@@ -9,7 +9,7 @@ import {
 import { header, toast, showError, busy, confirmDialog, icons } from '../ui.js';
 import {
   tripField, currencyField, textField, amountField, stakeFields, durationField, chipsHtml,
-  readForm, showErrors, clearErrors, attachNumberFormatting, unitOf,
+  readForm, showErrors, clearErrors, attachNumberFormatting, unitOf, conditionField, tagsField, bindConditionClear,
 } from './fields.js';
 
 function splitMinutes(m) {
@@ -24,7 +24,7 @@ function initialValues(db, mode, { session, active, presetTrip }) {
     const auto = {
       tripId: a.tripId || '', date: a.date, location: a.location, currency: a.currency,
       sb: fmtInput(a.sb), bb: fmtInput(a.bb), ...splitMinutes(elapsedMin),
-      buyin: fmtInput(A.liveBuyinTotal(a)), cashout: '', timeRake: '', note: '',
+      buyin: fmtInput(A.liveBuyinTotal(a)), cashout: '', timeRake: '', note: '', condition: a.condition ?? '', tags: [],
     };
     if (a.draft) {
       const v = { ...auto, ...a.draft };
@@ -41,7 +41,7 @@ function initialValues(db, mode, { session, active, presetTrip }) {
     const base = {
       tripId: s.tripId || '', date: s.date, location: s.location, currency: s.currency,
       sb: fmtInput(s.sb), bb: fmtInput(s.bb), ...splitMinutes(s.minutes),
-      buyin: fmtInput(s.buyin), cashout: fmtInput(s.cashout), timeRake: s.timeRake ? fmtInput(s.timeRake) : '', note: s.note || '',
+      buyin: fmtInput(s.buyin), cashout: fmtInput(s.cashout), timeRake: s.timeRake ? fmtInput(s.timeRake) : '', note: s.note || '', condition: s.condition ?? '', tags: s.tags || [],
     };
     return draft ? { values: { ...base, ...draft }, restored: true } : { values: base, restored: false };
   }
@@ -53,7 +53,7 @@ function initialValues(db, mode, { session, active, presetTrip }) {
     values: {
       tripId: presetTrip && db.trips.some((t) => t.id === presetTrip) ? presetTrip : A.defaultTripId(db, date), date, location: db.prefs.lastLocation || '', currency: cur,
       sb: st ? fmtInput(st.sb) : '', bb: st ? fmtInput(st.bb) : '', hours: '', mins: '',
-      buyin: '', cashout: '', timeRake: '', note: '',
+      buyin: '', cashout: '', timeRake: '', note: '', condition: '', tags: [],
     },
     restored: false,
   };
@@ -96,6 +96,12 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
       <div><span class="k">タイマー</span><span class="v">${esc(fmtDuration(Math.round(A.liveElapsedMs(a, a.endedAt || Date.now()) / 60000)))}</span></div>
     </div>` : '';
 
+  const reviewHtml = `
+          <section class="card form-card">
+            ${tagsField(v.tags)}
+            ${conditionField(v.condition, { hint: mode === 'finish' && v.condition ? '開始時に入力した値です。' : '' })}
+          </section>`;
+
   el.innerHTML = `
     ${header({ title, back })}
     <div class="page">
@@ -110,7 +116,8 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
             ${amountField({ name: 'cashout', label: '合計キャッシュアウト', value: v.cashout, unit: unitOf(v.currency), big: true, hint: '最後に持ち帰ったチップの合計額（回収0なら0）' })}
             ${amountField({ name: 'buyin', label: '合計バイイン（リバイ・追加購入込み）', value: v.buyin, unit: unitOf(v.currency), hint: 'プレイ中に記録した額を自動入力しています' })}
             <div class="preview" data-preview></div>
-          </section>` : ''}
+          </section>
+          ${reviewHtml}` : ''}
 
         <section class="card form-card">
           ${tripField(db, v.tripId)}
@@ -134,7 +141,8 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
             ${amountField({ name: 'buyin', label: '合計バイイン（リバイ・追加購入込み）', value: v.buyin, unit: unitOf(v.currency) })}
             ${amountField({ name: 'cashout', label: '合計キャッシュアウト', value: v.cashout, unit: unitOf(v.currency), hint: '回収0の場合は0を入力' })}
             <div class="preview" data-preview></div>
-          </section>` : ''}
+          </section>
+          ${reviewHtml}` : ''}
 
         <section class="card form-card">
           <details class="disclosure" ${trOpen ? 'open' : ''}>
@@ -163,6 +171,7 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
 
   const form = el.querySelector('form');
   attachNumberFormatting(form);
+  bindConditionClear(form, () => saveDraft());
   const cur = () => form.querySelector('[name="currency"]:checked')?.value || 'USD';
 
   function refreshCurrency() {
