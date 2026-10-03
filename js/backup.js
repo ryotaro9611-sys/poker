@@ -26,8 +26,8 @@ function markBackedUp(method, version) {
  */
 export async function backupNow() {
   if (isDemo()) throw new UserError('デモ中はバックアップできません。通常モードに戻ってから操作してください');
-  const version = getDb().lastChangeAt ?? 0;
   const json = exportJson();
+  const version = getDb().lastChangeAt ?? 0;
   const name = `trip-ledger-backup-${todayYMD()}.json`;
   let file = null;
   try { file = new File([json], name, { type: 'application/json' }); } catch { /* 古いブラウザ */ }

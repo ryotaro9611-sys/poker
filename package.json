@@ -2,7 +2,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "test": "node tests/calc.test.mjs && node tests/e2e.mjs",
+    "test": "node tests/calc.test.mjs && node tests/e2e.mjs && node tests/storage-audit.e2e.mjs",
     "test:calc": "node tests/calc.test.mjs",
     "test:e2e": "node tests/e2e.mjs"
   }

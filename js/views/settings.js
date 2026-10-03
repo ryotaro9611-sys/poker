@@ -1,5 +1,5 @@
 // 設定：デモ、バックアップ、為替、データ管理、使い方
-import { getDb, isDemo, enterDemo, exitDemo, importJson, wipeAll, requestPersist, status } from '../store.js';
+import { getDb, getRealDb, isDemo, enterDemo, exitDemo, importJson, wipeAll, requestPersist, status } from '../store.js';
 import { sessionRate } from '../calc.js';
 import { rateState } from '../rates.js';
 import { esc } from '../util.js';
@@ -7,7 +7,7 @@ import { backupNow, hasUnbackedChanges } from '../backup.js';
 import { header, icons, toast, showError, confirmDialog, modal, busy } from '../ui.js';
 import { pendingNotice, bindPendingNotice } from './sessions.js';
 
-export const APP_VERSION = '1.2.6';
+export const APP_VERSION = '1.2.7';
 
 export function renderSettings(el) {
   const db = getDb();
@@ -113,6 +113,7 @@ export function renderSettings(el) {
     const file = e.target.files && e.target.files[0];
     e.target.value = '';
     if (!file) return;
+    const expectedData = getRealDb();
     const ok = await confirmDialog({
       title: 'バックアップから復元しますか？',
       message: `「${esc(file.name)}」の内容で、この端末の現在のデータ（遠征${db.trips.length}件・記録${db.sessions.length}件）を<b>置き換えます</b>。`,
@@ -121,7 +122,7 @@ export function renderSettings(el) {
     if (!ok) return;
     try {
       const text = await file.text();
-      const r = importJson(text);
+      const r = importJson(text, { expectedData });
       toast(`復元しました（遠征${r.trips}件・記録${r.sessions}件）`, { type: 'success' });
     } catch (err) { showError(err); }
   });

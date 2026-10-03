@@ -4,6 +4,8 @@ import { validateData } from './schema.js';
 
 const KEY = 'tripledger:data:v1';
 const DEMO_FLAG = 'tripledger:demo';
+const WRITE_LOCK = `${KEY}:writer`;
+const WRITE_NOTICE = '別の画面（タブ）で記録を開いているため、この画面からは保存・復元できません。保存するには、ほかの画面を閉じてください。入力内容は残っています。';
 
 export class SaveError extends Error {
   constructor(cause) {
@@ -33,7 +35,47 @@ let quarantined = null;
 const listeners = new Set();
 // blocked: 壊れたデータの退避に失敗したため、元データを上書きしないよう保存を止めている
 // repaired: 直して開いたことを知らせるバナーの文言（閉じるまで表示）
-export const status = { storageOk: true, notice: null, blocked: false, repaired: null };
+export const status = { storageOk: true, notice: null, blocked: false, repaired: null, writerOk: false, writerNotice: WRITE_NOTICE };
+
+// localStorage の読み取り→変更→保存は、複数タブ間では不可分にならない。
+// 同じ保存領域では1画面だけに書き込みを許可する。読み取りとバックアップは他画面でも可能。
+function claimWriter() {
+  if (!navigator.locks?.request) {
+    status.writerNotice = 'このブラウザでは安全な保存に必要な機能を利用できません。対応ブラウザで開いてください。表示中の内容はバックアップできます。';
+    return;
+  }
+  let ready;
+  const initial = new Promise((resolve) => { ready = resolve; });
+  const failed = () => {
+    status.writerOk = false;
+    status.writerNotice = '保存の競合を防ぐ準備に失敗しました。入力内容は残っています。ほかの画面を閉じてから、この画面を開き直してください。';
+    ready();
+    emit();
+  };
+  const own = async (lock) => {
+    if (!lock) {
+      // 2画面目は閲覧できる状態で起動し、先の画面が閉じられるのを待つ。
+      navigator.locks.request(WRITE_LOCK, own).catch(failed);
+      ready();
+      return;
+    }
+    real = readReal();
+    status.writerOk = true;
+    ready();
+    emit({ external: true });
+    // document が閉じられるとブラウザがロックを解放し、待っている次の画面へ渡す。
+    await new Promise(() => {});
+  };
+  navigator.locks.request(WRITE_LOCK, { ifAvailable: true }, own).catch(failed);
+  return initial;
+}
+
+function assertWriter() {
+  if (!status.writerOk) throw new ConflictError(status.writerNotice);
+}
+
+// 時計を戻しても、前回のバックアップより後の変更は後の番号になる。
+const changeMarker = (db) => Math.max(Date.now(), (db.lastChangeAt ?? 0) + 1, (db.prefs.backupVersion ?? 0) + 1);
 
 /** 端末内データの読み込み：不正な記録は除外し、元データは消さずに別キーへ退避する */
 /**
@@ -95,7 +137,7 @@ function readReal() {
   return normalize(parsed, raw);
 }
 
-export function init() {
+export async function init() {
   real = readReal();
   try {
     if (sessionStorage.getItem(DEMO_FLAG) === '1') {
@@ -109,6 +151,7 @@ export function init() {
       if (!demo) emit({ external: true });
     }
   });
+  await claimWriter();
 }
 
 export function modeGeneration() {
@@ -162,19 +205,20 @@ export function commit(mutator, { silent = false, touch = !silent, gen = null } 
   if (gen != null && gen !== generation) return undefined;
   if (demo) {
     const next = clone(demoDb);
-    if (touch) next.lastChangeAt = Date.now();
+    if (touch) next.lastChangeAt = changeMarker(next);
     const result = mutator(next);
     demoDb = next;
     if (!silent) emit();
     return result;
   }
+  assertWriter();
   const base = readReal();
   // 読み直した最新の内容を手元にも反映する（保存が止まっても、画面は最新の状態で判断できる）
   real = base;
   if (status.blocked) throw new UserError(status.notice);
   const next = clone(base);
   // バックアップ後に変更があったかを判断するため、記録の変更時刻を残す（下書き保存などは除く）
-  if (touch) next.lastChangeAt = Date.now();
+  if (touch) next.lastChangeAt = changeMarker(next);
   const result = mutator(next);
   next.version = 1;
   try {
@@ -200,10 +244,12 @@ export async function requestPersist() {
 }
 
 export function exportJson() {
+  // storage イベントがまだ届いていなくても、保存済みの最新内容を含める。
+  real = readReal();
   return JSON.stringify({ app: 'TripLedger', exportedAt: new Date().toISOString(), data: real }, null, 2);
 }
 
-export function importJson(text) {
+export function importJson(text, { expectedData = null } = {}) {
   let parsed;
   try { parsed = JSON.parse(text); } catch { throw new UserError('ファイルを読み取れませんでした（JSON形式ではありません）'); }
   const data = parsed && parsed.data ? parsed.data : parsed;
@@ -211,12 +257,17 @@ export function importJson(text) {
     throw new UserError('このアプリのバックアップファイルではないようです');
   }
   if (demo) throw new UserError('デモ中は復元できません。通常モードに戻ってから操作してください');
+  assertWriter();
   // 1か所でも不正があれば取り込まず、今のデータをそのまま残す
   const { data: next, problems } = validateData(data, { strict: true });
   if (!next) {
     throw new UserError(`バックアップの内容に不正な値があるため復元しませんでした（${problems.length}件：${problems.slice(0, 2).join('／')}）。今のデータはそのままです。`);
   }
-  next.lastChangeAt = Date.now();
+  const base = readReal();
+  if (expectedData != null && JSON.stringify(base) !== JSON.stringify(expectedData)) {
+    throw new ConflictError('別の画面（タブ）などで、復元の確認後に記録が変更されました。今のデータはそのままです。内容を確認してから、もう一度復元してください。');
+  }
+  next.lastChangeAt = Math.max(changeMarker(next), changeMarker(base));
   try {
     localStorage.setItem(KEY, JSON.stringify(next));
   } catch (e) {
@@ -230,7 +281,9 @@ export function importJson(text) {
 
 export function wipeAll() {
   if (demo) throw new UserError('デモ中は実行できません');
+  assertWriter();
   const next = emptyDb();
+  next.lastChangeAt = changeMarker(readReal());
   try { localStorage.setItem(KEY, JSON.stringify(next)); } catch (e) { throw new SaveError(e); }
   real = next;
   clearRecoveryState();

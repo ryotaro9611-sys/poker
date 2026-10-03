@@ -95,8 +95,8 @@ function renderChrome(route) {
   if (store.isDemo()) {
     notices.push(`<div class="banner banner-demo"><span><b>デモ表示中</b>・架空データです（実データには影響しません）</span><button type="button" class="banner-btn" data-banner="exit-demo">通常に戻る</button></div>`);
   }
-  if (!store.status.storageOk || store.status.blocked) {
-    notices.push(`<div class="banner banner-error"><span>${esc(store.status.notice || '保存領域を利用できません')}</span></div>`);
+  if (!store.status.storageOk || store.status.blocked || (!store.isDemo() && !store.status.writerOk)) {
+    notices.push(`<div class="banner banner-error"><span>${esc(!store.status.writerOk ? store.status.writerNotice : store.status.notice || '保存領域を利用できません')}</span></div>`);
   } else if (store.status.repaired) {
     notices.push(`<div class="banner banner-warn"><span>${esc(store.status.repaired)}</span><button type="button" class="banner-btn" data-banner="dismiss-repaired">閉じる</button></div>`);
   }
@@ -165,8 +165,8 @@ function registerSW() {
   });
 }
 
-function boot() {
-  store.init();
+async function boot() {
+  await store.init();
   store.subscribe((info) => {
     if (info && info.mode) { render(); return; }
     rerenderIfLive();
@@ -202,7 +202,7 @@ function boot() {
 }
 
 try {
-  boot();
+  await boot();
 } catch (e) {
   console.error(e);
   const b = document.getElementById('boot');
