@@ -2,7 +2,11 @@
 import { buildDemoDb } from './demo.js';
 import { validateData } from './schema.js';
 
-const KEY = 'tripledger:data:v1';
+// v1.3.0 から保存場所を v2 に移した。旧版（v1.2.x）は v1 しか読み書きしないので、
+// 旧版の画面が残っていても、新しい項目（定額卓・レーキバック）を含むデータを上書きできない。
+const KEY = 'tripledger:data:v2';
+const LEGACY_KEY = 'tripledger:data:v1';
+const MIGRATED = 'tripledger:migrated-from-v1'; // 移行した時点の v1 の内容の指紋（その後の旧版での変更を検知する）
 const DEMO_FLAG = 'tripledger:demo';
 const WRITE_LOCK = `${KEY}:writer`;
 const WRITE_NOTICE = '別の画面（タブ）で記録を開いているため、この画面からは保存・復元できません。保存するには、ほかの画面を閉じてください。入力内容は残っています。';
@@ -35,7 +39,7 @@ let quarantined = null;
 const listeners = new Set();
 // blocked: 壊れたデータの退避に失敗したため、元データを上書きしないよう保存を止めている
 // repaired: 直して開いたことを知らせるバナーの文言（閉じるまで表示）
-export const status = { storageOk: true, notice: null, blocked: false, repaired: null, writerOk: false, writerNotice: WRITE_NOTICE };
+export const status = { storageOk: true, notice: null, blocked: false, repaired: null, writerOk: false, writerNotice: WRITE_NOTICE, legacyChanged: false };
 
 // localStorage の読み取り→変更→保存は、複数タブ間では不可分にならない。
 // 同じ保存領域では1画面だけに書き込みを許可する。読み取りとバックアップは他画面でも可能。
@@ -116,10 +120,55 @@ function clearRecoveryState() {
   quarantined = null;
 }
 
+/** 文字列の簡易な指紋（旧版が v1 を書き換えたかの検知用） */
+function fingerprint(str) {
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) h = ((h * 33) ^ str.charCodeAt(i)) >>> 0;
+  return `${str.length}:${h.toString(36)}`;
+}
+
+/**
+ * v1 → v2 の一度だけの移行。v1 は消さずに残す（旧版で開いたときの内容を壊さない）。
+ * 写せなかった（容量不足など）ときは v1 の内容を返し、保存を止める。
+ */
+function migrateLegacy() {
+  if (localStorage.getItem(KEY) != null) return null;
+  const old = localStorage.getItem(LEGACY_KEY);
+  if (old == null) return null;
+  try {
+    localStorage.setItem(KEY, old);
+    localStorage.setItem(MIGRATED, JSON.stringify({ at: Date.now(), fp: fingerprint(old) }));
+    return null;
+  } catch {
+    status.blocked = true;
+    status.notice = '新しい保存場所へデータを移せなかったため、保存を止めています（空き容量不足の可能性）。表示中の内容はバックアップできます。容量を空けてからアプリを開き直してください。';
+    return old;
+  }
+}
+
+/** 移行の後に、旧版の画面が v1 に保存したか（その内容は新しい版には反映されない） */
+function checkLegacyChanged() {
+  try {
+    const m = JSON.parse(localStorage.getItem(MIGRATED) || 'null');
+    const old = localStorage.getItem(LEGACY_KEY);
+    status.legacyChanged = !!(m && old != null && fingerprint(old) !== m.fp);
+  } catch { status.legacyChanged = false; }
+}
+
+export function dismissLegacyNotice() {
+  try {
+    const old = localStorage.getItem(LEGACY_KEY);
+    const m = JSON.parse(localStorage.getItem(MIGRATED) || 'null') || { at: Date.now() };
+    if (old != null) localStorage.setItem(MIGRATED, JSON.stringify({ ...m, fp: fingerprint(old) }));
+  } catch { /* noop */ }
+  status.legacyChanged = false;
+}
+
 function readReal() {
   let raw;
   try {
-    raw = localStorage.getItem(KEY);
+    const fallback = migrateLegacy();
+    raw = fallback ?? localStorage.getItem(KEY);
   } catch (e) {
     status.storageOk = false;
     status.notice = 'この端末のブラウザ保存領域を利用できません。記録は保存されない可能性があります（プライベートブラウズやCookie設定をご確認ください）。';
@@ -139,6 +188,7 @@ function readReal() {
 
 export async function init() {
   real = readReal();
+  checkLegacyChanged();
   try {
     if (sessionStorage.getItem(DEMO_FLAG) === '1') {
       demo = true;
@@ -149,6 +199,9 @@ export async function init() {
     if (e.key === KEY) {
       real = readReal();
       if (!demo) emit({ external: true });
+    } else if (e.key === LEGACY_KEY) {
+      checkLegacyChanged();
+      emit({ external: true });
     }
   });
   await claimWriter();

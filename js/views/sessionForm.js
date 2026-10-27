@@ -10,7 +10,7 @@ import { header, toast, showError, busy, confirmDialog, icons } from '../ui.js';
 import {
   tripField, currencyField, textField, amountField, stakeFields, durationField, chipsHtml,
   readForm, showErrors, clearErrors, attachNumberFormatting, unitOf, conditionField, tagsField, bindConditionClear, handleTripMissing,
-  formatField, modeBox, fixedFields, feeInputValue, bindFormatMode, rakebackField,
+  formatField, modeBox, fixedFields, feeInputValue, bindFormatMode, rakebackField, optionalBlindsField, sessionInput,
 } from './fields.js';
 
 function splitMinutes(m) {
@@ -31,9 +31,23 @@ function initialValues(db, mode, { session, active, presetTrip }) {
       table: fixedLive ? fmtInput(a.table) : '', feePerBuyin: fixedLive ? feeInputValue(a.table, a.feePerBuyin) : '', buyinCount: fixedLive ? String(a.buyins.length) : '1',
     };
     if (a.draft) {
-      const v = { ...auto, ...a.draft };
-      if (!a.draft.durationEdited) Object.assign(v, splitMinutes(elapsedMin));
-      if (!a.draft.buyinEdited) Object.assign(v, { buyin: auto.buyin, buyinCount: auto.buyinCount });
+      const d = a.draft;
+      const v = { ...auto, ...d };
+      if (!d.durationEdited) Object.assign(v, splitMinutes(elapsedMin));
+      // バイイン：手で直していなければプレイ中の記録から。直していても、その後にプレイ中で増減した分は足す
+      const liveTotal = A.liveBuyinTotal(a);
+      if (!d.buyinEdited) v.buyin = auto.buyin;
+      else if (d.buyinBase != null) {
+        const edited = parseNumber(d.buyin).value;
+        const base = parseNumber(d.buyinBase).value;
+        if (edited != null && base != null) v.buyin = fmtInput(Math.max(0, edited + (liveTotal - base)));
+      }
+      if (!d.countEdited) v.buyinCount = auto.buyinCount;
+      else if (d.countBase != null) {
+        const edited = parseNumber(d.buyinCount, { integer: true }).value;
+        const base = parseNumber(d.countBase, { integer: true }).value;
+        if (edited != null && base != null) v.buyinCount = String(Math.max(1, edited + (a.buyins.length - base)));
+      }
       return { values: v, restored: true };
     }
     return { values: auto, restored: false };
@@ -113,6 +127,7 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
   const { values: v, restored } = initialValues(db, mode, { session, active: mode === 'finish' ? getDb().active : null, presetTrip });
   let durationEdited = !!(active && active.draft && active.draft.durationEdited);
   let buyinEdited = !!(active && active.draft && active.draft.buyinEdited);
+  let countEdited = !!(active && active.draft && active.draft.countEdited);
   const a = mode === 'finish' ? getDb().active : null;
   // この画面が扱う対象（別タブでの変更や、デモ⇔通常の切り替え後に誤って書き込まないため）
   const gen = modeGeneration();
@@ -120,6 +135,9 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
   const activeRev = a ? a.rev || 0 : null;
   const baseUpdatedAt = session ? session.updatedAt : null;
 
+  // 定額卓の任意のブラインド欄には、その記録自身の値だけを入れる（新規ではブラインド制の前回値を流用しない）
+  const fixedBlinds = v.format === 'fixed' && (mode !== 'new' || restored)
+    ? { sb: v.fixedSb ?? v.sb ?? '', bb: v.fixedBb ?? v.bb ?? '' } : { sb: '', bb: '' };
   const title = mode === 'new' ? '過去のプレイを記録' : mode === 'edit' ? '記録の編集' : '精算して保存';
   const back = mode === 'new' ? '#/' : mode === 'edit' ? `#/sessions/${id}` : '#/';
   const trOpen = !!(v.timeRake && parseNumber(v.timeRake).value > 0);
@@ -161,7 +179,7 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
           <section class="card form-card form-card-accent">
             ${amountField({ name: 'cashout', label: '合計キャッシュアウト', value: v.cashout, unit: unitOf(v.currency), big: true, hint: '最後に持ち帰ったチップの合計額（回収0なら0）' })}
             ${modeBox('blind', amountField({ name: 'buyin', label: '合計バイイン（リバイ・追加購入込み）', value: v.buyin, unit: unitOf(v.currency), hint: 'プレイ中に記録した額を自動入力しています' }))}
-            ${modeBox('fixed', fixedFields({ table: v.table, fee: v.feePerBuyin, count: v.buyinCount, unit: unitOf(v.currency), withCount: true }))}
+            ${modeBox('fixed', fixedFields({ table: v.table, fee: v.feePerBuyin, count: v.buyinCount, unit: unitOf(v.currency), withCount: true }) + optionalBlindsField(fixedBlinds.sb, fixedBlinds.bb))}
             ${rakebackField(v.rakeback, unitOf(v.currency))}
             <div class="preview" data-preview></div>
           </section>
@@ -188,7 +206,7 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
         ${mode !== 'finish' ? `
           <section class="card form-card">
             ${modeBox('blind', amountField({ name: 'buyin', label: '合計バイイン（リバイ・追加購入込み）', value: v.buyin, unit: unitOf(v.currency) }))}
-            ${modeBox('fixed', fixedFields({ table: v.table, fee: v.feePerBuyin, count: v.buyinCount, unit: unitOf(v.currency), withCount: true }))}
+            ${modeBox('fixed', fixedFields({ table: v.table, fee: v.feePerBuyin, count: v.buyinCount, unit: unitOf(v.currency), withCount: true }) + optionalBlindsField(fixedBlinds.sb, fixedBlinds.bb))}
             ${amountField({ name: 'cashout', label: '合計キャッシュアウト', value: v.cashout, unit: unitOf(v.currency), hint: '回収0の場合は0を入力' })}
             ${rakebackField(v.rakeback, unitOf(v.currency))}
             <div class="preview" data-preview></div>
@@ -248,7 +266,7 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
   }
 
   function refreshPreview() {
-    const raw = readForm(form);
+    const raw = sessionInput(readForm(form));
     const r = validateSession({ ...raw, location: raw.location || 'x', date: raw.date || todayYMD() });
     const box = form.querySelector('[data-preview]');
     const trBox = form.querySelector('[data-tr-summary]');
@@ -301,7 +319,11 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
     delete raw.repairAck; // 確認欄は下書きに残さない（開き直したら改めて確認してもらう）
     try {
       const written = mode === 'finish'
-        ? A.saveLiveDraft({ ...raw, durationEdited, buyinEdited }, { activeId, gen, rev: activeRev })
+        ? A.saveLiveDraft({
+          ...raw, durationEdited, buyinEdited, countEdited,
+          // 下書きを書いた時点のプレイ中の合計（後でプレイ中に増減した分を、手で直した値に足すため）
+          buyinBase: fmtInput(A.liveBuyinTotal(a)), countBase: String(a.buyins.length),
+        }, { activeId, gen, rev: activeRev })
         : (A.setDraft(draftKey, raw, { gen }), true);
       if (written) {
         status.textContent = '入力途中の内容は自動で保存されています';
@@ -325,7 +347,9 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
       if (t) form.tripId.value = t.id;
     }
     if (n === 'hours' || n === 'mins') durationEdited = true;
-    if (n === 'buyin' || n === 'buyinCount' || n === 'table' || n === 'feePerBuyin') buyinEdited = true;
+    // 料金やテーブル額を直しても、回数は「手で直した」扱いにしない（プレイ中の追加を取りこぼさない）
+    if (n === 'buyin') buyinEdited = true;
+    if (n === 'buyinCount') countEdited = true;
     if (n === 'currency') refreshCurrency();
     if (e.target.getAttribute('aria-invalid')) {
       e.target.removeAttribute('aria-invalid');
@@ -344,7 +368,11 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
     if (chip) {
       const d = JSON.parse(chip.dataset.chip);
       if (d.location) form.location.value = d.location;
-      if (d.bb != null) { form.sb.value = fmtInput(d.sb); form.bb.value = fmtInput(d.bb); }
+      if (d.bb != null) {
+        // 同じ名前の欄が方式ごとにあるので、ブラインド制側の欄に入れる
+        form.querySelector('[data-mode="blind"] [name="sb"]').value = fmtInput(d.sb);
+        form.querySelector('[data-mode="blind"] [name="bb"]').value = fmtInput(d.bb);
+      }
       form.dispatchEvent(new Event('input', { bubbles: true }));
       return;
     }
@@ -382,7 +410,7 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
     e.preventDefault();
     const btn = form.querySelector('[data-act="save"]');
     await busy(btn, async () => {
-      const raw = readForm(form);
+      const raw = sessionInput(readForm(form));
       const r = validateSession(raw);
       if (repairs.length && !form.querySelector('[name="repairAck"]')?.checked) r.errors.repairAck = '修復した内容を確認してから保存してください';
       if (Object.keys(r.errors).length) { showErrors(form, r.errors); return; }

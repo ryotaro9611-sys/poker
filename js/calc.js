@@ -70,7 +70,7 @@ export function summarize(sessions) {
   const money = () => ({ profit: 0, tableProfit: 0, fee: 0, rakeback: 0, paid: 0 });
   const out = {
     count: 0, minutes: 0, bb: 0, bbMinutes: 0, bbCount: 0, wins: 0, losses: 0, feeCount: 0,
-    jpy: { count: 0, minutes: 0, pending: 0, pendingMinutes: 0, ...money() },
+    jpy: { count: 0, minutes: 0, pending: 0, pendingMinutes: 0, feeCount: 0, ...money() },
     byCurrency: {},
   };
   // 円換算は記録ごとに丸めてから足す（sessionProfitJPY と同じ。合計の端数がずれないように）
@@ -98,6 +98,7 @@ export function summarize(sessions) {
     } else {
       out.jpy.count++;
       out.jpy.minutes += s.minutes;
+      out.jpy.feeCount += sessionFeeCount(s); // 円換算の料金に対応する回数（換算済みの分だけ）
       addMoney(out.jpy, s, rate);
     }
     const c = (out.byCurrency[s.currency] ||= { currency: s.currency, count: 0, minutes: 0, bb: 0, bbMinutes: 0, feeCount: 0, ...money() });

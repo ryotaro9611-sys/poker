@@ -1,7 +1,7 @@
 // データ操作（遠征・セッション・タイマー）。すべて store.commit 経由で原子的に保存する。
 import { commit, getDb, UserError, ConflictError } from './store.js';
 import { uid, todayYMD, ymdFromDate, ymdInTz, currentTz, fmtInput } from './util.js';
-import { MAX_MINUTES, fixedAmounts } from './calc.js';
+import { MAX_MINUTES, fixedAmounts, defaultFee } from './calc.js';
 
 /* ---------------- 共通 ---------------- */
 
@@ -345,8 +345,12 @@ function syncDraft(a, v, before) {
   if (changed('bb')) d.bb = fmtInput(a.bb);
   if (changed('tripId')) d.tripId = a.tripId || '';
   if (changed('condition')) d.condition = a.condition == null ? '' : String(a.condition);
-  if (changed('table')) d.table = fmtInput(a.table);
-  if (changed('feePerBuyin')) d.feePerBuyin = fmtInput(a.feePerBuyin);
+  // テーブル額と料金は組で反映する。料金欄の空欄は「そのテーブル額の自動料金」の意味なので、
+  // どちらかが変わったら、新しいテーブル額に対して決め直す（同じ料金が別の自動料金に化けないように）
+  if (changed('table') || changed('feePerBuyin')) {
+    d.table = fmtInput(a.table);
+    d.feePerBuyin = a.feePerBuyin === defaultFee(a.table) ? '' : fmtInput(a.feePerBuyin);
+  }
   if (a.buyins.length !== before.count && a.format === 'fixed') d.buyinCount = String(a.buyins.length);
   // プレイ日は、下書きで手動で変えていなければ開始時刻の日付に合わせる
   if (changed('date') && d.date === before.date) d.date = a.date;

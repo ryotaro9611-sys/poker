@@ -163,7 +163,8 @@ export function showErrors(form, errors) {
   clearErrors(form);
   let first = null;
   for (const [k, msg] of Object.entries(errors)) {
-    const el = form.querySelector(`[data-err="${k}"]`);
+    const cands = $$(`[data-err="${k}"]`, form);
+    const el = cands.find((e) => !e.closest('fieldset[disabled]')) || cands[0];
     if (el) el.textContent = msg;
     const inputs = k === 'duration' ? $$('[name="hours"],[name="mins"]', form) : $$(`[name="${k}"]`, form);
     inputs.forEach((i) => i.setAttribute('aria-invalid', 'true'));
@@ -324,4 +325,35 @@ export function rakebackField(value, unit) {
         <span class="field-error" data-err="rakeback"></span>
       </label>
     </details>`;
+}
+
+/** 定額卓の任意のブラインド（入れると bb/時間も出す）。ブラインド制の欄と取り違えないよう、名前を分ける（fixedSb・fixedBb） */
+export function optionalBlindsField(sb, bb) {
+  const has = !!(sb || bb);
+  return `
+    <details class="disclosure" ${has ? 'open' : ''}>
+      <summary><span>ブラインド（任意）</span><span class="disclosure-value">${has ? esc(`${sb}/${bb}`) : 'なし'}</span></summary>
+      <div class="field">
+        <div class="stake-row">
+          <span class="input-wrap"><span class="input-prefix">SB</span><input class="input num" type="text" inputmode="decimal" name="fixedSb" value="${esc(sb)}" autocomplete="off" aria-label="スモールブラインド（任意）"></span>
+          <span class="stake-slash">/</span>
+          <span class="input-wrap"><span class="input-prefix">BB</span><input class="input num" type="text" inputmode="decimal" name="fixedBb" value="${esc(bb)}" autocomplete="off" aria-label="ビッグブラインド（任意）"></span>
+        </div>
+        <span class="field-hint">入れると、この記録も bb/時間の集計に含めます。不要なら空欄のまま。</span>
+        <span class="field-error" data-err="sb"></span>
+        <span class="field-error" data-err="bb"></span>
+      </div>
+    </details>`;
+}
+
+/** フォームの値を記録の入力に整える：定額卓では任意のブラインド欄（fixedSb・fixedBb）を sb・bb として扱う */
+export function sessionInput(raw) {
+  const out = { ...raw };
+  if (out.format === 'fixed') {
+    out.sb = out.fixedSb ?? '';
+    out.bb = out.fixedBb ?? '';
+  }
+  delete out.fixedSb;
+  delete out.fixedBb;
+  return out;
 }

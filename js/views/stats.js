@@ -353,7 +353,7 @@ function feeCard(sum, isYen) {
     <section class="card">
       <h3 class="card-title">料金と ROI${isYen && sum.jpy.pending ? ' <small class="muted">換算待ちを除く</small>' : ''}</h3>
       <div class="kv"><span class="k">料金を引く前の収支（卓上）</span><span class="v num ${signClass(m.tableProfit)}">${esc(fmtV(m.tableProfit))}</span></div>
-      <div class="kv"><span class="k">料金（${sum.feeCount}回）</span><span class="v num">${m.fee ? esc(fmtV(-m.fee)) : '0'}</span></div>
+      <div class="kv"><span class="k">料金（${m.feeCount}回${isYen && sum.jpy.pending && sum.feeCount !== m.feeCount ? `／全${sum.feeCount}回のうち換算済み` : ''}）</span><span class="v num">${m.fee ? esc(fmtV(-m.fee)) : '0'}</span></div>
       ${m.rakeback ? `<div class="kv"><span class="k">レーキバック</span><span class="v num pos">${esc(fmtV(m.rakeback))}</span></div>` : ''}
       <div class="kv kv-total"><span class="k">料金を引いた収支</span><span class="v num ${signClass(m.profit)}">${esc(fmtV(m.profit))}</span></div>
       <div class="stat-grid">

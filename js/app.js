@@ -95,9 +95,14 @@ function renderChrome(route) {
   if (store.isDemo()) {
     notices.push(`<div class="banner banner-demo"><span><b>デモ表示中</b>・架空データです（実データには影響しません）</span><button type="button" class="banner-btn" data-banner="exit-demo">通常に戻る</button></div>`);
   }
-  if (!store.status.storageOk || store.status.blocked || (!store.isDemo() && !store.status.writerOk)) {
+  const saveStopped = !store.status.storageOk || store.status.blocked || (!store.isDemo() && !store.status.writerOk);
+  if (saveStopped) {
     notices.push(`<div class="banner banner-error"><span>${esc(!store.status.writerOk ? store.status.writerNotice : store.status.notice || '保存領域を利用できません')}</span></div>`);
-  } else if (store.status.repaired) {
+  }
+  if (store.status.legacyChanged && !store.isDemo()) {
+    notices.push(`<div class="banner banner-warn"><span>古い版（v1.2 以前）の画面で、この端末に記録が保存されました。その内容はこの画面には反映されていません。古い版の画面は閉じ、記録はこの画面で入れ直してください。</span><button type="button" class="banner-btn" data-banner="dismiss-legacy">閉じる</button></div>`);
+  }
+  if (!saveStopped && store.status.repaired) {
     notices.push(`<div class="banner banner-warn"><span>${esc(store.status.repaired)}</span><button type="button" class="banner-btn" data-banner="dismiss-repaired">閉じる</button></div>`);
   }
   banner.innerHTML = notices.join('');
@@ -177,6 +182,7 @@ async function boot() {
     const b = e.target.closest('[data-banner="exit-demo"]');
     if (b) { store.exitDemo(); toast('通常利用に戻りました'); location.hash = '#/'; }
     if (e.target.closest('[data-banner="dismiss-repaired"]')) { store.dismissRepaired(); if (current) renderChrome(current); }
+    if (e.target.closest('[data-banner="dismiss-legacy"]')) { store.dismissLegacyNotice(); if (current) renderChrome(current); }
   });
 
   window.addEventListener('hashchange', () => render());

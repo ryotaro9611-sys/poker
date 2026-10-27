@@ -4,7 +4,7 @@
 //   メモ・冴え・タグ・遠征の参照・為替などの付随項目は、その項目だけ初期化して記録を残す
 // 入力画面の検証（calc.js / util.js）と同じ上限を使い、アプリ自身が保存した値を拒否しないようにする。
 import { CURRENCY_CODES, isValidYMD, ymdFromDate, ymdInTz, MAX_NUMBER } from './util.js';
-import { MAX_MINUTES } from './calc.js';
+import { MAX_MINUTES, fixedAmounts } from './calc.js';
 import { normalizeCondition, TAG_IDS } from './tags.js';
 
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -134,6 +134,12 @@ function checkSession(s, tripIds, ctx) {
   if (!isAmount(s.buyin) || !isAmount(s.cashout)) ctx.fail('金額が不正です');
   if (s.timeRake != null && !isAmount(s.timeRake)) ctx.fail('タイムレーキが不正です');
   if (s.rakeback != null && !isAmount(s.rakeback)) ctx.fail('レーキバックが不正です');
+  if (fmt.format === 'fixed') {
+    // 定額卓：チップ代と料金の合計は、テーブル額・料金・回数から決まる。食い違えば収支が定まらないので不正
+    const exp = fixedAmounts(fmt.table, fmt.feePerBuyin, fmt.buyinCount);
+    const same = (x, y) => Math.abs(x - y) < 0.005;
+    if (!same(s.buyin, exp.buyin) || !same(s.timeRake ?? 0, exp.timeRake)) ctx.fail('定額卓の金額が、テーブル額・料金・回数と一致しません');
+  }
   const out = {
     id: s.id, tripId: checkTripRef(s.tripId, tripIds, ctx), date: s.date, location: checkLocation(s.location, ctx), currency: s.currency,
     ...fmt, minutes: s.minutes, buyin: s.buyin, cashout: s.cashout, timeRake: s.timeRake ?? 0,
@@ -160,9 +166,9 @@ function checkSession(s, tripIds, ctx) {
 const DRAFT_TEXT = [
   'tripId', 'date', 'location', 'currency', 'sb', 'bb', 'hours', 'mins', 'buyin', 'cashout', 'timeRake', 'note', 'condition',
   'name', 'startDate', 'endDate', 'expenses',
-  'format', 'table', 'feePerBuyin', 'buyinCount', 'rakeback',
+  'format', 'table', 'feePerBuyin', 'buyinCount', 'rakeback', 'buyinBase', 'countBase', 'fixedSb', 'fixedBb',
 ];
-const DRAFT_BOOL = ['durationEdited', 'buyinEdited'];
+const DRAFT_BOOL = ['durationEdited', 'buyinEdited', 'countEdited'];
 
 function checkDraft(d, ctx) {
   if (d == null) return null;
@@ -266,6 +272,15 @@ function checkActive(a, tripIds, ctx) {
   if (undated) {
     ctx.soft('バイインの日時が不正です', null, 'バイインの日時を開始時刻にしました');
     note('日時が不明なバイインの記録があったため、開始時刻の記録にしました。');
+  }
+  if (fmt.format === 'fixed') {
+    // 定額卓：1回分は「チップ＝テーブル額−料金、料金＝1回あたりの料金」。食い違えばテーブル額と料金から作り直す
+    const one = fixedAmounts(fmt.table, fmt.feePerBuyin, 1);
+    const bad = buyins.some((b) => Math.abs(b.amount - one.buyin) >= 0.005 || Math.abs((b.fee ?? -1) - one.timeRake) >= 0.005);
+    if (bad) {
+      buyins = ctx.soft('定額卓のバイインが、テーブル額・料金と一致しません', buyins.map((b) => ({ amount: one.buyin, fee: one.timeRake, at: b.at })), '定額卓のバイインの内訳を直しました');
+      note('定額卓のバイインの内訳が、テーブル額・料金と合っていなかったため直しました。払った額を確認してください。');
+    }
   }
 
   let date = a.date;

@@ -404,5 +404,27 @@ t('保存データの検査：旧版の記録（方式の項目なし）はブ�
   assert.equal(summarize(r.data.sessions).jpy.profit, 71120, 'デモの合計は変わらない');
 });
 
+t('T5：定額卓の回数・料金とチップ代・料金合計が食い違うバックアップは拒否する', () => {
+  const ok = { id: 'tw', tripId: null, date: '2026-10-30', location: 'T', currency: 'TWD', format: 'fixed', sb: null, bb: null, table: 6600, feePerBuyin: 600, buyinCount: 2, buyin: 12000, timeRake: 1200, cashout: 9900, minutes: 120, rate: null, createdAt: 1, updatedAt: 1 };
+  assert.deepEqual(validateData({ trips: [], sessions: [ok] }, { strict: true }).problems, []);
+  for (const bad of [{ buyinCount: 1 }, { buyin: 6000 }, { timeRake: 600 }]) {
+    assert.equal(validateData({ trips: [], sessions: [{ ...ok, ...bad }] }, { strict: true }).data, null, JSON.stringify(bad));
+  }
+  const now = Date.now();
+  const active = { id: 'a', tripId: null, location: 'T', currency: 'TWD', sb: null, bb: null, format: 'fixed', table: 6600, feePerBuyin: 600, date: '2026-10-30', tz: 'Asia/Taipei', startedAt: now - 3600e3, segments: [{ s: now - 3600e3, e: null }], status: 'playing', buyins: [{ amount: 6000, fee: 600, at: now - 3600e3 }], draft: null, rev: 0 };
+  assert.deepEqual(validateData({ trips: [], sessions: [], active }, { strict: true }).problems, []);
+  assert.equal(validateData({ trips: [], sessions: [], active: { ...active, buyins: [{ amount: 5000, fee: 600, at: now }] } }, { strict: true }).data, null, '進行中の1回分が食い違う');
+});
+
+t('T7：円換算の料金の回数は、換算済みの記録だけで数える', () => {
+  const v = validateSession({ ...fixedRaw }).value;
+  const done = { ...v, rate: { value: 4.8, date: '2026-10-30', source: 'x', manual: true } };
+  const pend = { ...validateSession({ ...fixedRaw, buyinCount: '2' }).value, rate: null };
+  const sum = summarize([done, pend]);
+  assert.equal(sum.feeCount, 3, '全件では3回');
+  assert.equal(sum.jpy.feeCount, 1, '円換算の料金（2,880円）に対応するのは1回');
+  assert.equal(sum.jpy.fee, 2880);
+});
+
 console.log(`\n${n} tests passed${failed ? `, ${failed} failed` : ''}`);
 if (failed) process.exit(1);

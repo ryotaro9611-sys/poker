@@ -139,7 +139,7 @@ const q = (sel) => JSON.stringify(sel);
 const click = (sel) => ev(`(() => { const el = document.querySelector(${q(sel)}); if (!el) throw new Error('要素なし: ' + ${q(sel)}); el.click(); return true; })()`);
 const setVal = (sel, v) => ev(`(() => { const el = document.querySelector(${q(sel)}); if (!el) throw new Error('要素なし: ' + ${q(sel)}); el.value = ${q(String(v))}; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`);
 const text = (sel = '#view') => ev(`(document.querySelector(${q(sel)})?.innerText || '')`);
-const data = () => ev(`JSON.parse(localStorage.getItem('tripledger:data:v1') || 'null')`);
+const data = () => ev(`JSON.parse(localStorage.getItem('tripledger:data:v2') || 'null')`);
 const go = async (hash) => { await ev(`location.hash = ${q(hash)}`); await sleep(120); };
 async function reload() {
   // 古いページの「起動完了」を見て先へ進まないよう、目印を付けてから再読み込みし、新しいページの起動を待つ
@@ -157,7 +157,7 @@ const modalPrimary = () => click('.modal .btn-primary');
 
 /** 実データを直接用意する（UI経由でないと確認できない部分以外の準備を短縮） */
 async function seed(db) {
-  await ev(`localStorage.setItem('tripledger:data:v1', ${q(JSON.stringify({ version: 1, trips: [], sessions: [], active: null, drafts: {}, prefs: {}, rateCache: {}, ...db }))})`);
+  await ev(`localStorage.setItem('tripledger:data:v2', ${q(JSON.stringify({ version: 1, trips: [], sessions: [], active: null, drafts: {}, prefs: {}, rateCache: {}, ...db }))})`);
   await reload();
 }
 
@@ -185,7 +185,7 @@ const test = (name, fn) => tests.push({ name, fn });
 
 import nodeAssert from 'node:assert/strict';
 
-const KEY = 'tripledger:data:v1';
+const KEY = 'tripledger:data:v2';
 const canonical = (d) => { const { lastChangeAt, ...rest } = d; return rest; };
 const fixture = {
   version: 1,
