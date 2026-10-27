@@ -9,6 +9,7 @@ const LEGACY_KEY = 'tripledger:data:v1';
 const MIGRATED = 'tripledger:migrated-from-v1'; // 移行した時点の v1 の内容の指紋（その後の旧版での変更を検知する）
 const DEMO_FLAG = 'tripledger:demo';
 const WRITE_LOCK = `${KEY}:writer`;
+const MIGRATE_NOTICE = '新しい保存場所へデータを移せなかったため、保存を止めています（空き容量不足の可能性）。表示中の内容はバックアップできます。容量を空けてからアプリを開き直してください。';
 const WRITE_NOTICE = '別の画面（タブ）で記録を開いているため、この画面からは保存・復元できません。保存するには、ほかの画面を閉じてください。入力内容は残っています。';
 
 export class SaveError extends Error {
@@ -36,10 +37,18 @@ let demo = false;
 // デモ⇔通常の切り替えごとに増える。遅延保存が切り替え後の別データへ書き込むのを防ぐ
 let generation = 0;
 let quarantined = null;
+// 保存を止めている理由。移行の失敗を、その後のデータ検査の結果で解除しないよう別々に持つ
+const stop = { migrate: false, quarantine: false };
 const listeners = new Set();
-// blocked: 壊れたデータの退避に失敗したため、元データを上書きしないよう保存を止めている
+// blocked: 壊れたデータの退避か、新しい保存場所への移行に失敗したため、保存を止めている
 // repaired: 直して開いたことを知らせるバナーの文言（閉じるまで表示）
 export const status = { storageOk: true, notice: null, blocked: false, repaired: null, writerOk: false, writerNotice: WRITE_NOTICE, legacyChanged: false };
+
+function syncBlocked() {
+  status.blocked = stop.migrate || stop.quarantine;
+  if (stop.migrate) status.notice = MIGRATE_NOTICE;
+  else if (status.notice === MIGRATE_NOTICE) status.notice = null;
+}
 
 // localStorage の読み取り→変更→保存は、複数タブ間では不可分にならない。
 // 同じ保存領域では1画面だけに書き込みを許可する。読み取りとバックアップは他画面でも可能。
@@ -90,14 +99,16 @@ function quarantine(raw, doneNotice, reason) {
   try {
     localStorage.setItem(`${KEY}:corrupt:${Date.now()}`, raw);
     quarantined = raw; // 退避できたときだけ処理済みにする
-    status.blocked = false;
+    stop.quarantine = false;
     status.notice = doneNotice;
     status.repaired = doneNotice;
     return true;
   } catch {
-    status.blocked = true;
+    stop.quarantine = true;
     status.notice = `保存データに不正な値がありますが、元のデータを退避できなかったため、保存を止めています（空き容量不足の可能性）。表示中の内容はそのままバックアップできます。容量を空けてからアプリを開き直してください。（${reason}）`;
     return false;
+  } finally {
+    syncBlocked();
   }
 }
 
@@ -105,7 +116,8 @@ function quarantine(raw, doneNotice, reason) {
 function normalize(d, raw) {
   const { data, problems } = validateData(d, { strict: false });
   if (!problems.length) {
-    status.blocked = false;
+    stop.quarantine = false;
+    syncBlocked();
     return data;
   }
   quarantine(raw, `保存データの一部に不正な値があったため、直して開きました（${problems.length}件：${problems[0]}）。元のデータは端末内に退避しています。`, problems[0]);
@@ -114,10 +126,13 @@ function normalize(d, raw) {
 
 /** 正常なデータで置き換えたら（復元・全削除）、停止や修復の表示を解除する */
 function clearRecoveryState() {
-  status.blocked = false;
+  stop.quarantine = false;
+  stop.migrate = false; // 新しい保存場所に書けたので、移行は不要になった
+  syncBlocked();
   status.notice = null;
   status.repaired = null;
   quarantined = null;
+  markLegacySeen();
 }
 
 /** 文字列の簡易な指紋（旧版が v1 を書き換えたかの検知用） */
@@ -129,46 +144,64 @@ function fingerprint(str) {
 
 /**
  * v1 → v2 の一度だけの移行。v1 は消さずに残す（旧版で開いたときの内容を壊さない）。
- * 写せなかった（容量不足など）ときは v1 の内容を返し、保存を止める。
+ * 写せなかった（容量不足など）ときは v1 の内容を返し、保存を止める。読み込みのたびに再試行する。
  */
 function migrateLegacy() {
-  if (localStorage.getItem(KEY) != null) return null;
-  const old = localStorage.getItem(LEGACY_KEY);
-  if (old == null) return null;
   try {
-    localStorage.setItem(KEY, old);
-    localStorage.setItem(MIGRATED, JSON.stringify({ at: Date.now(), fp: fingerprint(old) }));
-    return null;
-  } catch {
-    status.blocked = true;
-    status.notice = '新しい保存場所へデータを移せなかったため、保存を止めています（空き容量不足の可能性）。表示中の内容はバックアップできます。容量を空けてからアプリを開き直してください。';
-    return old;
+    if (localStorage.getItem(KEY) != null) { stop.migrate = false; return null; }
+    const old = localStorage.getItem(LEGACY_KEY);
+    if (old == null) { stop.migrate = false; return null; }
+    try {
+      // 先に印を書いてから本体を写す（本体だけ写って印がない＝旧版の保存を検知できない状態を作らない）
+      localStorage.setItem(MIGRATED, JSON.stringify({ at: Date.now(), fp: fingerprint(old) }));
+      localStorage.setItem(KEY, old);
+      stop.migrate = false;
+      return null;
+    } catch {
+      stop.migrate = true;
+      return old;
+    }
+  } finally {
+    syncBlocked();
   }
 }
 
-/** 移行の後に、旧版の画面が v1 に保存したか（その内容は新しい版には反映されない） */
+/**
+ * 移行の後に、旧版の画面が v1 に保存したか（その内容は新しい版には反映されない）。
+ * 'changed'：保存された／'maybe'：印がなく確かめられない（v1.3.1 で印だけ書けなかった場合）
+ */
 function checkLegacyChanged() {
   try {
-    const m = JSON.parse(localStorage.getItem(MIGRATED) || 'null');
     const old = localStorage.getItem(LEGACY_KEY);
-    status.legacyChanged = !!(m && old != null && fingerprint(old) !== m.fp);
+    const cur = localStorage.getItem(KEY);
+    // 移行前（v1 をそのまま表示中）や、旧データがなければ対象外
+    if (old == null || cur == null) { status.legacyChanged = false; return; }
+    const m = JSON.parse(localStorage.getItem(MIGRATED) || 'null');
+    if (m && typeof m.fp === 'string') { status.legacyChanged = fingerprint(old) !== m.fp ? 'changed' : false; return; }
+    // 本体だけ写って印がない：写した直後なら同じ内容なので印を補う。違えば、旧版の保存を見落とさないよう知らせる
+    if (old === cur) { markLegacySeen(); status.legacyChanged = false; } else status.legacyChanged = 'maybe';
   } catch { status.legacyChanged = false; }
 }
 
-export function dismissLegacyNotice() {
+/** 今の v1 の内容を「確認済み」として印を書き直す（失敗しても次回また確かめる） */
+function markLegacySeen() {
   try {
     const old = localStorage.getItem(LEGACY_KEY);
+    if (old == null) return;
     const m = JSON.parse(localStorage.getItem(MIGRATED) || 'null') || { at: Date.now() };
-    if (old != null) localStorage.setItem(MIGRATED, JSON.stringify({ ...m, fp: fingerprint(old) }));
+    localStorage.setItem(MIGRATED, JSON.stringify({ ...m, fp: fingerprint(old) }));
   } catch { /* noop */ }
+}
+
+export function dismissLegacyNotice() {
+  markLegacySeen();
   status.legacyChanged = false;
 }
 
 function readReal() {
   let raw;
   try {
-    const fallback = migrateLegacy();
-    raw = fallback ?? localStorage.getItem(KEY);
+    raw = migrateLegacy() ?? localStorage.getItem(KEY);
   } catch (e) {
     status.storageOk = false;
     status.notice = 'この端末のブラウザ保存領域を利用できません。記録は保存されない可能性があります（プライベートブラウズやCookie設定をご確認ください）。';
@@ -200,6 +233,8 @@ export async function init() {
       real = readReal();
       if (!demo) emit({ external: true });
     } else if (e.key === LEGACY_KEY) {
+      // 移行できずに v1 を表示しているときは、旧版の保存も読み直す（移行も再試行する）
+      if (stop.migrate) real = readReal();
       checkLegacyChanged();
       emit({ external: true });
     }

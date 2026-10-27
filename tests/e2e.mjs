@@ -19,10 +19,14 @@ let swVersion = null;
 // 旧版のテスト用：/old/ で v1.2.7（440e7c7）のアプリを同じオリジンに配信する（同じ保存領域を共有する）
 const OLD_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'tripledger-old-'));
 execSync(`git -C "${ROOT}" archive 440e7c7 | tar -x -C "${OLD_ROOT}"`);
+// /v130/ で v1.3.0（e9fe70b）：台湾対応の最初の版。保存場所は v1（その下書きを新しい版が引き継ぐテスト用）
+const V130_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'tripledger-v130-'));
+execSync(`git -C "${ROOT}" archive e9fe70b | tar -x -C "${V130_ROOT}"`);
 const server = http.createServer((req, res) => {
   let p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
   let base = ROOT;
   if (p.startsWith('/old/')) { base = OLD_ROOT; p = p.slice(4); }
+  else if (p.startsWith('/v130/')) { base = V130_ROOT; p = p.slice(5); }
   const file = path.join(base, p.endsWith('/') ? p + 'index.html' : p);
   if (!file.startsWith(base) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); res.end(); return; }
   res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-store' });
@@ -1412,6 +1416,242 @@ test('T6：ブラインド付きの定額卓をメモだけ編集しても、ブ
   assert(s0.sb === 25 && s0.bb === 50 && s0.note === 'メモだけ', JSON.stringify({ sb: s0.sb, bb: s0.bb }));
 });
 
+/* ---------- 7回目のレビュー（v1.3.1）の指摘 ---------- */
+
+const settleOpen = async () => { await click('[data-live=finish]'); await waitFor(`!!document.querySelector('[name=cashout]')`); };
+const backToPlay = async () => { await click('[data-act=back-to-play]'); await waitFor(`location.hash === '#/' && !!document.querySelector('.live-card')`); };
+const draftOf = async () => (await data())?.active?.draft || null;
+async function liveEditCount(n) {
+  await click('.live-edit');
+  await waitFor(`!!document.querySelector('[name=buyinCount]')`);
+  await setVal('[name=buyinCount]', n);
+  await click('[data-act=save]');
+  await waitFor(`location.hash === '#/'`);
+}
+const countValue = () => ev(`document.querySelector('[name=buyinCount]').value`);
+const unregisterSw = () => ev(`navigator.serviceWorker.getRegistrations().then((rs) => Promise.all(rs.map((r) => r.unregister()))).then(() => caches.keys()).then((ks) => Promise.all(ks.map((k) => caches.delete(k)))).then(() => 1)`);
+
+test('T8：精算で回数を直した後、プレイ中の修正で回数を指定し直すと、その回数になる（増やす・減らす・再読み込み・追加・取り消し）', async () => {
+  await fresh();
+  await seed({ active: twActive() });
+  await settleOpen();
+  await setVal('[name=buyinCount]', '2');
+  await setVal('[name=cashout]', '30000');
+  await waitFor(`JSON.parse(localStorage.getItem('tripledger:data:v2')).active.draft?.buyinCount === '2'`, 3000, '下書き');
+  await backToPlay();
+  await liveEditCount('3');
+  await settleOpen();
+  assert((await countValue()) === '3', `増やした：3回のはずが ${await countValue()}`);
+  await backToPlay();
+  await liveEditCount('2');
+  await reload();
+  await settleOpen();
+  assert((await countValue()) === '2', `減らした：2回のはずが ${await countValue()}`);
+  await backToPlay();
+  await click('[data-live=add-fixed]');
+  await waitFor(`JSON.parse(localStorage.getItem('tripledger:data:v2')).active.buyins.length === 3`, 3000, '追加');
+  await click('[data-live=undo-buyin]');
+  await waitFor(`!!document.querySelector('.modal .btn-danger')`);
+  await click('.modal .btn-danger');
+  await waitFor(`JSON.parse(localStorage.getItem('tripledger:data:v2')).active.buyins.length === 2`, 3000, '取り消し');
+  await sleep(1100);
+  await click('[data-live=add-fixed]');
+  await waitFor(`JSON.parse(localStorage.getItem('tripledger:data:v2')).active.buyins.length === 3`, 3000, '追加');
+  await settleOpen();
+  assert((await countValue()) === '3', `追加・取り消し・追加：3回のはずが ${await countValue()}`);
+  await click('[data-act=save]');
+  await waitFor(`/^#\\/sessions\\/[^/n]/.test(location.hash)`, 3000, '保存');
+  const s0 = (await data()).sessions[0];
+  assert(s0.buyinCount === 3 && s0.buyin + s0.timeRake === 19800 && s0.cashout - s0.buyin - s0.timeRake === 10200, JSON.stringify({ n: s0.buyinCount, paid: s0.buyin + s0.timeRake, p: s0.cashout - s0.buyin - s0.timeRake }));
+});
+
+test('T8：ブラインド制でも、精算で直した合計バイインの後にプレイ中の内訳を直すと、その合計になる', async () => {
+  await fresh();
+  const now = Date.now();
+  await seed({ active: { id: 'bl', tripId: null, location: 'Manila', currency: 'USD', sb: 1, bb: 2, date: '2026-10-30', tz: 'Asia/Tokyo', startedAt: now - 3600e3, segments: [{ s: now - 3600e3, e: null }], status: 'playing', buyins: [{ amount: 100, at: now - 3600e3 }], draft: null, rev: 0 } });
+  await settleOpen();
+  await setVal('[name=buyin]', '300');
+  await setVal('[name=cashout]', '500');
+  await waitFor(`JSON.parse(localStorage.getItem('tripledger:data:v2')).active.draft?.buyin === '300'`, 3000, '下書き');
+  await backToPlay();
+  await click('.live-edit');
+  await waitFor(`!!document.querySelector('[name=buyin_0]')`);
+  await setVal('[name=buyin_0]', '250');
+  await click('[data-act=save]');
+  await waitFor(`location.hash === '#/'`);
+  await settleOpen();
+  const b = await ev(`document.querySelector('[name=buyin]').value`);
+  assert(b === '250', `最後に直した内訳の合計 250 のはずが ${b}`);
+  assert((await ev(`document.querySelector('[name=cashout]').value`)).replace(',', '') === '500', 'キャッシュアウトは残る');
+});
+
+test('T9：v1.3.0 の精算画面で直した回数は、更新後も残り、プレイ中の記録と違うことを知らせる', async () => {
+  await fresh();
+  await unregisterSw();
+  await send('Page.navigate', { url: BASE + 'v130/#/' });
+  await waitFor(`document.documentElement.classList.contains('ready') && location.pathname === '/v130/'`, 10000, 'v1.3.0 の起動');
+  await ev(`localStorage.clear(); 1`);
+  await send('Page.navigate', { url: BASE + 'v130/#/live/start' });
+  await waitFor(`document.documentElement.classList.contains('ready') && !!document.querySelector('[name=format][value=fixed]')`, 10000, 'v1.3.0 の開始画面');
+  assert(await ev(`import('/v130/js/views/settings.js').then((m) => m.APP_VERSION)`) === '1.3.0', 'v1.3.0 を開いている');
+  await click('[name=format][value=fixed]');
+  await setVal('[name=location]', 'Taipei Club');
+  await click('[data-act=start]');
+  await waitFor(`location.hash === '#/' && !!document.querySelector('[data-live=finish]')`, 5000, 'v1.3.0 で開始');
+  await settleOpen();
+  await setVal('[name=buyinCount]', '3');
+  await setVal('[name=cashout]', '30000');
+  await waitFor(`JSON.parse(localStorage.getItem('tripledger:data:v1')).active.draft?.buyinCount === '3'`, 3000, 'v1.3.0 の下書き');
+  const oldDraft = await ev(`JSON.parse(localStorage.getItem('tripledger:data:v1')).active.draft`);
+  assert(!('countEdited' in oldDraft) && oldDraft.buyinEdited === true, `v1.3.0 の下書きの形 ${JSON.stringify(oldDraft)}`);
+  // 新しい版に更新して精算する
+  await send('Page.navigate', { url: BASE + '#/live/finish' });
+  await waitFor(`document.documentElement.classList.contains('ready') && !!document.querySelector('[name=cashout]')`, 10000, '新しい版の精算画面');
+  assert((await countValue()) === '3', `直した3回が残る（実際 ${await countValue()}）`);
+  includes(await text('[data-legacy-draft]'), '3回', '違いのお知らせ');
+  includes(await text('[data-legacy-draft]'), '1回', '違いのお知らせ');
+  await click('[data-act=save]');
+  await waitFor(`/^#\\/sessions\\/[^/n]/.test(location.hash)`, 3000, '保存');
+  const s0 = (await data()).sessions[0];
+  assert(s0.buyinCount === 3 && s0.cashout - s0.buyin - s0.timeRake === 10200, JSON.stringify({ n: s0.buyinCount, p: s0.cashout - s0.buyin - s0.timeRake }));
+});
+
+test('T9：v1.3.0 の下書き（回数だけ／料金だけ／両方を直した）を、端末の読み込みとバックアップ復元の両方で正しく引き継ぐ', async () => {
+  const base = { tripId: '', date: '2026-10-30', location: 'Taipei Club', currency: 'TWD', format: 'fixed', table: '6,600', feePerBuyin: '', buyinCount: '1', hours: '1', mins: '0', cashout: '30,000', rakeback: '', note: '', condition: '', tags: [], durationEdited: false, buyinEdited: true };
+  const cases = [
+    { name: '回数だけ', draft: { buyinCount: '3' }, count: '3', fee: '', notice: true },
+    { name: '料金だけ', draft: { feePerBuyin: '500' }, count: '1', fee: '500', notice: false },
+    { name: '両方', draft: { buyinCount: '3', feePerBuyin: '500' }, count: '3', fee: '500', notice: true },
+    { name: '直していない', draft: { buyinEdited: false, buyinCount: '3' }, count: '1', fee: '', notice: false },
+  ];
+  for (const via of ['load', 'import']) {
+    for (const c of cases) {
+      await fresh();
+      const db = { version: 1, trips: [], sessions: [], drafts: {}, prefs: {}, rateCache: {}, active: twActive({ status: 'settling', endedAt: Date.now(), feePerBuyin: 600, draft: { ...base, ...c.draft } }) };
+      db.active.segments = [{ s: db.active.startedAt, e: db.active.endedAt }];
+      if (via === 'load') {
+        // v1.3.0 が保存していた場所（v1）から移行する
+        await ev(`localStorage.clear(); localStorage.setItem('tripledger:data:v1', ${q(JSON.stringify(db))}); 1`);
+        await reload();
+      } else {
+        await importFile({ app: 'TripLedger', data: db });
+        await waitFor(`!!JSON.parse(localStorage.getItem('tripledger:data:v2') || 'null')?.active`, 3000, '復元');
+      }
+      await go('#/live/finish');
+      await waitFor(`!!document.querySelector('[name=cashout]')`);
+      const got = { count: await countValue(), fee: await ev(`document.querySelector('[name=feePerBuyin]').value`), notice: await ev(`!!document.querySelector('[data-legacy-draft]')`) };
+      assert(got.count === c.count && got.fee === c.fee && got.notice === c.notice, `${via}・${c.name}：${JSON.stringify(got)}`);
+    }
+  }
+});
+
+test('T9：更新前の版のブラインド制の下書きで直した合計バイインは残し、記録との違いを知らせる', async () => {
+  await fresh();
+  const now = Date.now();
+  await seed({ active: { id: 'bl', tripId: null, location: 'Manila', currency: 'USD', sb: 1, bb: 2, date: '2026-10-30', tz: 'Asia/Tokyo', startedAt: now - 3600e3, segments: [{ s: now - 3600e3, e: now }], endedAt: now, status: 'settling', buyins: [{ amount: 100, at: now - 3600e3 }, { amount: 100, at: now - 60e3 }], rev: 0,
+    draft: { location: 'Manila', currency: 'USD', sb: '1', bb: '2', buyin: '300', cashout: '500', durationEdited: false, buyinEdited: true } } });
+  await go('#/live/finish');
+  await waitFor(`!!document.querySelector('[name=cashout]')`);
+  assert((await ev(`document.querySelector('[name=buyin]').value`)) === '300', '直した値を残す');
+  includes(await text('[data-legacy-draft]'), '200', '記録の合計');
+});
+
+test('T10：新しい保存場所への移行に失敗したら保存を止めたままにし、容量が戻れば移行して続けられる', async () => {
+  await fresh();
+  const tw = { id: 'tw1', tripId: null, date: '2026-10-30', location: 'Taipei Club', currency: 'TWD', format: 'fixed', sb: null, bb: null, table: 6600, feePerBuyin: 600, buyinCount: 1, buyin: 6000, timeRake: 600, cashout: 9900, minutes: 120, rate: null, note: '', createdAt: 1, updatedAt: 1 };
+  await ev(`localStorage.clear(); localStorage.setItem('tripledger:data:v1', ${q(JSON.stringify({ version: 1, trips: [], sessions: [tw], active: null, drafts: {}, prefs: {}, rateCache: {} }))}); 1`);
+  const script = await send('Page.addScriptToEvaluateOnNewDocument', { source: `window.__failKeys = ['tripledger:data:v2']; (() => { const orig = Storage.prototype.setItem; Storage.prototype.setItem = function (k, v) { if ((window.__failKeys || []).includes(k)) throw new DOMException('quota', 'QuotaExceededError'); return orig.call(this, k, v); }; })();` });
+  try {
+    await reload();
+    includes(await text('#banner'), '移せなかった', '保存を止めたことを知らせる');
+    assert(await ev(`import('./js/store.js').then((m) => m.status.blocked && m.getDb().sessions.length === 1)`), '保存は止まり、記録は表示される');
+    // 保存しようとしても、旧データを置き換えない
+    await go('#/trips/new');
+    await setVal('[name=name]', '台湾');
+    await click('[data-act=save]');
+    await sleep(300);
+    assert((await ev(`localStorage.getItem('tripledger:data:v2')`)) == null, '新しい場所には書いていない');
+    // 容量が戻ったら、次の保存で移行してから保存する
+    await ev(`window.__failKeys = []; 1`);
+    await click('[data-act=save]');
+    await waitFor(`/^#\\/trips\\/[^/n]/.test(location.hash)`, 3000, '保存');
+    const d = await data();
+    assert(d.sessions.length === 1 && d.trips.length === 1, `移行して保存：${JSON.stringify({ s: d.sessions.length, t: d.trips.length })}`);
+    assert(await ev(`!!localStorage.getItem('tripledger:migrated-from-v1')`), '移行の印');
+    assert(!(await text('#banner')).includes('移せなかった'), '停止の表示が消える');
+  } finally {
+    await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: script.identifier });
+    await reload();
+  }
+});
+
+test('T10：移行の印を書けないときは本体も写さず、旧版の追記も表示する。印が欠けた状態からも旧版の保存を見落とさない', async () => {
+  await fresh();
+  const tw = { id: 'tw1', tripId: null, date: '2026-10-30', location: 'Taipei Club', currency: 'TWD', format: 'fixed', sb: null, bb: null, table: 6600, feePerBuyin: 600, buyinCount: 1, buyin: 6000, timeRake: 600, cashout: 9900, minutes: 120, rate: null, note: '', createdAt: 1, updatedAt: 1 };
+  const v1 = { version: 1, trips: [], sessions: [tw], active: null, drafts: {}, prefs: {}, rateCache: {} };
+  await ev(`localStorage.clear(); localStorage.setItem('tripledger:data:v1', ${q(JSON.stringify(v1))}); 1`);
+  const script = await send('Page.addScriptToEvaluateOnNewDocument', { source: `window.__failKeys = ['tripledger:migrated-from-v1']; (() => { const orig = Storage.prototype.setItem; Storage.prototype.setItem = function (k, v) { if ((window.__failKeys || []).includes(k)) throw new DOMException('quota', 'QuotaExceededError'); return orig.call(this, k, v); }; })();` });
+  try {
+    await reload();
+    assert((await ev(`localStorage.getItem('tripledger:data:v2')`)) == null, '本体だけ写さない');
+    includes(await text('#banner'), '移せなかった', '保存を止めたことを知らせる');
+    // 旧版の画面が v1 に追記した
+    await ev(`(() => { const k = 'tripledger:data:v1'; const d = JSON.parse(localStorage.getItem(k)); d.sessions.push({ ...d.sessions[0], id: 'old-new', cashout: 20000 }); localStorage.setItem(k, JSON.stringify(d)); window.dispatchEvent(new StorageEvent('storage', { key: k })); return 1; })()`);
+    await sleep(150);
+    assert(await ev(`import('./js/store.js').then((m) => m.getDb().sessions.length)`) === 2, '旧版の追記も表示に入る');
+  } finally {
+    await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: script.identifier });
+    await reload();
+  }
+  let d = await data();
+  assert(d && d.sessions.length === 2, `容量が戻れば2件とも移行（${d && d.sessions.length}）`);
+  // v1.3.1 で本体だけ写って印がない状態：同じ内容なら印を補う
+  const raw = JSON.stringify(v1);
+  await ev(`localStorage.clear(); localStorage.setItem('tripledger:data:v1', ${q(raw)}); localStorage.setItem('tripledger:data:v2', ${q(raw)}); 1`);
+  await reload();
+  assert(!(await text('#banner')).includes('古い版'), '同じ内容なら知らせない');
+  assert(await ev(`!!localStorage.getItem('tripledger:migrated-from-v1')`), '印を補う');
+  // 内容が違えば、旧版で保存された可能性を知らせる
+  await ev(`localStorage.clear(); localStorage.setItem('tripledger:data:v2', ${q(raw)}); const d = ${raw}; d.sessions.push({ ...d.sessions[0], id: 'old-new' }); localStorage.setItem('tripledger:data:v1', JSON.stringify(d)); 1`);
+  await reload();
+  includes(await text('#banner'), '可能性', '旧版の保存を見落とさせない');
+  await click('[data-banner="dismiss-legacy"]');
+  await reload();
+  assert(!(await text('#banner')).includes('古い版'), '閉じたら次からは出さない');
+});
+
+test('T11：追加の直後に端末の時計が戻っても、1秒たてば次の追加ができる', async () => {
+  await fresh();
+  await seed({ active: twActive() });
+  await click('[data-live=add-fixed]');
+  await waitFor(`JSON.parse(localStorage.getItem('tripledger:data:v2')).active.buyins.length === 2`, 3000, '追加');
+  await ev(`window.__dateNow = Date.now; Date.now = () => window.__dateNow() - 3600e3; 1`);
+  try {
+    await sleep(1100);
+    await click('[data-live=add-fixed]');
+    await waitFor(`JSON.parse(localStorage.getItem('tripledger:data:v2')).active.buyins.length === 3`, 3000, '時計を戻した後の追加');
+  } finally {
+    await ev(`Date.now = window.__dateNow; 1`);
+  }
+});
+
+test('T12：テーブル額×回数が保存の上限を超える入力は、保存前にエラーにして入力を残す', async () => {
+  await fresh();
+  await go('#/sessions/new');
+  await click('[name=format][value=fixed]');
+  await setVal('[name=location]', 'Large');
+  await setVal('[name=table]', '1000000000000');
+  await setVal('[name=feePerBuyin]', '0');
+  await setVal('[name=buyinCount]', '2');
+  await setVal('[name=hours]', '1');
+  await setVal('[name=cashout]', '0');
+  await click('[data-act=save]');
+  await sleep(200);
+  includes(await text('[data-err=buyinCount]'), '大きすぎます', '回数の欄のエラー');
+  assert(!((await data())?.sessions || []).length, '保存していない');
+  assert((await ev(`location.hash`)) === '#/sessions/new', '入力画面のまま');
+});
+
 test('画面幅：375px・430px で横にはみ出さない', async () => {
   await fresh();
   await ev(`sessionStorage.setItem('tripledger:demo', '1')`);
@@ -1466,5 +1706,6 @@ console.log(`\n${selected.length - failed}/${selected.length} passed`);
   server.close();
   try { fs.rmSync(profile, { recursive: true, force: true }); } catch { /* noop */ }
   try { fs.rmSync(OLD_ROOT, { recursive: true, force: true }); } catch { /* noop */ }
+  try { fs.rmSync(V130_ROOT, { recursive: true, force: true }); } catch { /* noop */ }
 }
 process.exit(failed ? 1 : 0);

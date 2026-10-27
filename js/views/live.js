@@ -380,9 +380,9 @@ export function tickLive(root) {
   root.querySelectorAll('[data-tick="break"]').forEach((n) => { n.textContent = br; });
 }
 
-/** 定額卓の「追加」の連打防止：直前の追加から1秒以内のタップは無視する */
+/** 定額卓の「追加」の連打防止：直前の追加から1秒以内のタップは無視する（端末の時計を直しても狂わない経過時間で測る） */
 const ADD_GUARD_MS = 1000;
-let lastFixedAddAt = 0;
+let lastFixedAddAt = -Infinity;
 
 export function bindLiveCard(root) {
   root.addEventListener('click', async (e) => {
@@ -404,8 +404,8 @@ export function bindLiveCard(root) {
       } else if (act === 'add-fixed') {
         // 定額卓：確認なしでワンタップ（間違えたら「取り消す」）。
         // 保存後に画面が描き直されてボタンが新しくなるため、連打の防止は画面をまたいで時刻で行う
-        if (Date.now() - lastFixedAddAt < ADD_GUARD_MS) return;
-        lastFixedAddAt = Date.now();
+        if (performance.now() - lastFixedAddAt < ADD_GUARD_MS) return;
+        lastFixedAddAt = performance.now();
         await busy(btn, async () => {
           A.addFixedBuyin(a.id);
           toast(`${fmtAmount(a.table, a.currency)} を追加しました（${a.buyins.length + 1}回目）`, { type: 'success' });

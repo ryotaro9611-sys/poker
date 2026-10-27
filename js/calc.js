@@ -1,5 +1,5 @@
 // 成績計算（純粋関数のみ。UI・保存処理に依存しない）
-import { CURRENCY_CODES, isValidYMD, parseNumber } from './util.js';
+import { CURRENCY_CODES, isValidYMD, parseNumber, MAX_NUMBER } from './util.js';
 import { normalizeCondition, normalizeTags } from './tags.js';
 
 const round2 = (x) => Math.round(x * 100) / 100;
@@ -349,6 +349,8 @@ export function validateFixed(raw, { requireCount = true } = {}) {
   else value.buyinCount = cn.value;
   if (value.table != null && value.feePerBuyin != null && value.buyinCount != null) {
     Object.assign(value, fixedAmounts(value.table, value.feePerBuyin, value.buyinCount));
+    // 1つずつは上限内でも、回数を掛けた合計が保存できる上限を超えないように
+    if (value.buyin > MAX_NUMBER || value.timeRake > MAX_NUMBER) errors.buyinCount = '払った額の合計が大きすぎます。テーブルの額か回数を見直してください';
   }
   return { ok: !Object.keys(errors).length, errors, value };
 }

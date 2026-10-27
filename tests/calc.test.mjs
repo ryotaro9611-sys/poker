@@ -5,7 +5,7 @@ import { validateData } from '../js/schema.js';
 import {
   sessionProfit, sessionProfitJPY, sessionBB, summarize, tripResult, cumulativeSeries,
   validateSession, validateTrip, groupSummaries, stakeKey, extremes, maxDrawdown, tripMetrics,
-  defaultFee, sessionTableProfit, sessionPaid, sessionFeeCount, FIXED_TABLES,
+  defaultFee, sessionTableProfit, sessionPaid, sessionFeeCount, FIXED_TABLES, validateFixed,
 } from '../js/calc.js';
 import { parseNumber, fmtMoney, fmtYen, fmtBBph, fmtHourly, addDaysYMD, toInputInTz, fromInputInTz, ymdInTz } from '../js/util.js';
 
@@ -424,6 +424,19 @@ t('T7：円換算の料金の回数は、換算済みの記録だけで数える
   assert.equal(sum.feeCount, 3, '全件では3回');
   assert.equal(sum.jpy.feeCount, 1, '円換算の料金（2,880円）に対応するのは1回');
   assert.equal(sum.jpy.fee, 2880);
+});
+
+t('T12：1つずつは上限内でも、回数を掛けた合計が保存の上限を超える定額卓は入力エラーにする', () => {
+  const over = validateFixed({ table: '1,000,000,000,000', feePerBuyin: '0', buyinCount: '2' });
+  assert.equal(over.ok, false);
+  assert.match(over.errors.buyinCount, /大きすぎます/);
+  const edge = validateFixed({ table: '500,000,000,000', feePerBuyin: '0', buyinCount: '2' });
+  assert.equal(edge.ok, true, 'ちょうど上限は保存できる');
+  assert.equal(edge.value.buyin, 1e12);
+  const s = validateSession({ ...fixedRaw, table: '500,000,000,000', feePerBuyin: '0', buyinCount: '2', cashout: '0' });
+  assert.equal(s.ok, true);
+  assert.deepEqual(validateData({ trips: [], sessions: [{ ...s.value, id: 'big', createdAt: 1, updatedAt: 1 }] }, { strict: true }).problems, [], '保存できた値は読み込みでも通る');
+  assert.equal(validateSession({ ...fixedRaw, table: '500,000,000,001', feePerBuyin: '0', buyinCount: '2', cashout: '0' }).ok, false);
 });
 
 console.log(`\n${n} tests passed${failed ? `, ${failed} failed` : ''}`);

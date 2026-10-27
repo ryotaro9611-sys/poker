@@ -33,22 +33,35 @@ function initialValues(db, mode, { session, active, presetTrip }) {
     if (a.draft) {
       const d = a.draft;
       const v = { ...auto, ...d };
+      const notes = [];
       if (!d.durationEdited) Object.assign(v, splitMinutes(elapsedMin));
       // バイイン：手で直していなければプレイ中の記録から。直していても、その後にプレイ中で増減した分は足す
       const liveTotal = A.liveBuyinTotal(a);
-      if (!d.buyinEdited) v.buyin = auto.buyin;
+      const buyinEdited = !!d.buyinEdited;
+      if (!buyinEdited) v.buyin = auto.buyin;
       else if (d.buyinBase != null) {
         const edited = parseNumber(d.buyin).value;
         const base = parseNumber(d.buyinBase).value;
         if (edited != null && base != null) v.buyin = fmtInput(Math.max(0, edited + (liveTotal - base)));
+      } else if (!fixedLive && parseNumber(d.buyin).value != null && parseNumber(d.buyin).value !== liveTotal) {
+        // 更新前の版の下書き（基準がない）：直した値は捨てずに残し、プレイ中の記録と違うことを知らせる
+        notes.push(`合計バイイン：更新前の版で入力した ${d.buyin} を残しています（プレイ中の記録は ${auto.buyin}）。`);
       }
-      if (!d.countEdited) v.buyinCount = auto.buyinCount;
+      let countEdited = !!d.countEdited;
+      if (!('countEdited' in d) && fixedLive) {
+        // v1.3.0 の下書きには回数を直したかの印がない（料金などを直しても buyinEdited になっていた）。
+        // 入力された回数がプレイ中の記録と違うときは、その値を残して確かめてもらう（黙って捨てない）
+        const n = parseNumber(d.buyinCount, { integer: true, max: 999 }).value;
+        countEdited = !!d.buyinEdited && n != null && n >= 1 && n !== a.buyins.length;
+        if (countEdited) notes.push(`バイイン回数：更新前の版で入力した ${n}回 を残しています（プレイ中の記録は ${a.buyins.length}回）。`);
+      }
+      if (!countEdited) v.buyinCount = auto.buyinCount;
       else if (d.countBase != null) {
         const edited = parseNumber(d.buyinCount, { integer: true }).value;
         const base = parseNumber(d.countBase, { integer: true }).value;
         if (edited != null && base != null) v.buyinCount = String(Math.max(1, edited + (a.buyins.length - base)));
       }
-      return { values: v, restored: true };
+      return { values: v, restored: true, edited: { buyin: buyinEdited, count: countEdited }, notes };
     }
     return { values: auto, restored: false };
   }
@@ -124,10 +137,10 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
   }
 
   const draftKey = mode === 'edit' ? `edit:${id}` : 'new-session';
-  const { values: v, restored } = initialValues(db, mode, { session, active: mode === 'finish' ? getDb().active : null, presetTrip });
+  const { values: v, restored, edited = {}, notes = [] } = initialValues(db, mode, { session, active: mode === 'finish' ? getDb().active : null, presetTrip });
   let durationEdited = !!(active && active.draft && active.draft.durationEdited);
-  let buyinEdited = !!(active && active.draft && active.draft.buyinEdited);
-  let countEdited = !!(active && active.draft && active.draft.countEdited);
+  let buyinEdited = !!edited.buyin;
+  let countEdited = !!edited.count;
   const a = mode === 'finish' ? getDb().active : null;
   // この画面が扱う対象（別タブでの変更や、デモ⇔通常の切り替え後に誤って書き込まないため）
   const gen = modeGeneration();
@@ -170,6 +183,7 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
     <div class="page">
       ${restored && mode !== 'finish' ? `<div class="notice notice-info">${icons.check}<div>入力途中の内容を復元しました。<button type="button" class="link" data-act="discard-draft">破棄して最初から</button></div></div>` : ''}
       ${restored && mode === 'finish' ? `<div class="notice notice-info">${icons.check}<div>入力途中の内容を復元しました。</div></div>` : ''}
+      ${notes.length ? `<div class="notice notice-warn" data-legacy-draft>${icons.alert}<div><b>入力した値がプレイ中の記録と違います</b>${notes.map((m) => `<span>${esc(m)}</span>`).join('')}<span>正しい値か確かめてから保存してください。</span></div></div>` : ''}
       ${timerInfo}
       ${repairHtml}
       <form class="form" novalidate autocomplete="off">

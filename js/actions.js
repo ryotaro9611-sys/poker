@@ -1,6 +1,6 @@
 // データ操作（遠征・セッション・タイマー）。すべて store.commit 経由で原子的に保存する。
 import { commit, getDb, UserError, ConflictError } from './store.js';
-import { uid, todayYMD, ymdFromDate, ymdInTz, currentTz, fmtInput } from './util.js';
+import { uid, todayYMD, ymdFromDate, ymdInTz, currentTz, fmtInput, MAX_NUMBER } from './util.js';
 import { MAX_MINUTES, fixedAmounts, defaultFee } from './calc.js';
 
 /* ---------------- 共通 ---------------- */
@@ -287,6 +287,10 @@ export function addBuyin(amount, expectedId) {
 export function addFixedBuyin(expectedId) {
   return withActive((a) => {
     if (a.format !== 'fixed') throw new UserError('定額卓のセッションではありません');
+    const total = fixedAmounts(a.table, a.feePerBuyin, a.buyins.length + 1);
+    if (a.buyins.length >= 999 || total.buyin > MAX_NUMBER || total.timeRake > MAX_NUMBER) {
+      throw new UserError('これ以上は追加できません（回数か合計額が上限を超えます）');
+    }
     a.buyins.push(fixedBuyin(a.table, a.feePerBuyin, Date.now()));
     return a;
   }, expectedId);
@@ -305,7 +309,7 @@ export function editLive(v, expectedId, expectedRev) {
   return withActive((a, db) => {
     if (a.status === 'settling') throw new UserError('精算入力中です。精算画面で修正してください');
     if (v.tripId !== undefined) assertTrip(db, v.tripId);
-    const before = { location: a.location, currency: a.currency, sb: a.sb, bb: a.bb, tripId: a.tripId, condition: a.condition, date: a.date, table: a.table, feePerBuyin: a.feePerBuyin, count: a.buyins.length };
+    const before = { location: a.location, currency: a.currency, sb: a.sb, bb: a.bb, tripId: a.tripId, condition: a.condition, date: a.date, table: a.table, feePerBuyin: a.feePerBuyin, count: a.buyins.length, amounts: buyinAmounts(a) };
     const now = Date.now();
     if (v.startedAt != null && v.startedAt !== a.startedAt) {
       const first = a.segments[0];
@@ -331,6 +335,8 @@ export function editLive(v, expectedId, expectedRev) {
   }, expectedId, expectedRev);
 }
 
+const buyinAmounts = (a) => a.buyins.map((b) => b.amount).join(',');
+
 /**
  * プレイ中に直した情報を、精算の下書きにも反映する（古い下書きで巻き戻さない）。
  * 実際に値が変わった項目だけを反映し、精算画面で手で直した値やキャッシュアウトはそのまま残す。
@@ -351,7 +357,19 @@ function syncDraft(a, v, before) {
     d.table = fmtInput(a.table);
     d.feePerBuyin = a.feePerBuyin === defaultFee(a.table) ? '' : fmtInput(a.feePerBuyin);
   }
-  if (a.buyins.length !== before.count && a.format === 'fixed') d.buyinCount = String(a.buyins.length);
+  // バイインの合計・回数をプレイ中の編集で指定し直したら、それを最新の値にする。精算画面で手で直した値と
+  // 差分の基準も一緒に置き換え、反映済みの増減を精算でもう一度足さない
+  if (a.format === 'fixed') {
+    if (a.buyins.length !== before.count) {
+      d.buyinCount = String(a.buyins.length);
+      d.countBase = d.buyinCount;
+      d.countEdited = false;
+    }
+  } else if (buyinAmounts(a) !== before.amounts) {
+    d.buyin = fmtInput(liveBuyinTotal(a));
+    d.buyinBase = d.buyin;
+    d.buyinEdited = false;
+  }
   // プレイ日は、下書きで手動で変えていなければ開始時刻の日付に合わせる
   if (changed('date') && d.date === before.date) d.date = a.date;
 }

@@ -100,7 +100,8 @@ function renderChrome(route) {
     notices.push(`<div class="banner banner-error"><span>${esc(!store.status.writerOk ? store.status.writerNotice : store.status.notice || '保存領域を利用できません')}</span></div>`);
   }
   if (store.status.legacyChanged && !store.isDemo()) {
-    notices.push(`<div class="banner banner-warn"><span>古い版（v1.2 以前）の画面で、この端末に記録が保存されました。その内容はこの画面には反映されていません。古い版の画面は閉じ、記録はこの画面で入れ直してください。</span><button type="button" class="banner-btn" data-banner="dismiss-legacy">閉じる</button></div>`);
+    const what = store.status.legacyChanged === 'maybe' ? '記録が保存された可能性があります' : '記録が保存されました';
+    notices.push(`<div class="banner banner-warn"><span>古い版（v1.3.0 以前）の画面で、この端末に${what}。その内容はこの画面には反映されていません。古い版の画面は閉じ、記録はこの画面で入れ直してください。</span><button type="button" class="banner-btn" data-banner="dismiss-legacy">閉じる</button></div>`);
   }
   if (!saveStopped && store.status.repaired) {
     notices.push(`<div class="banner banner-warn"><span>${esc(store.status.repaired)}</span><button type="button" class="banner-btn" data-banner="dismiss-repaired">閉じる</button></div>`);
