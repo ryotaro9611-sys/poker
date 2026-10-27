@@ -2,7 +2,7 @@
 import { getDb, getRealDb, isDemo, enterDemo } from '../store.js';
 import * as A from '../actions.js';
 import { summarize, tripResult, sortSessions, sessionRate } from '../calc.js';
-import { esc, fmtYen, fmtDuration, fmtBBph, fmtDateRange, fmtStake, fmtAmount, signClass, todayYMD, fmtDate } from '../util.js';
+import { esc, fmtYen, fmtDuration, fmtBBph, fmtDateRange, fmtStake, fmtSessionStake, fmtAmount, fmtPercent, signClass, todayYMD, fmtDate } from '../util.js';
 import { icons, toast, showError, busy, emptyState } from '../ui.js';
 import { liveCardHtml, bindLiveCard, quickStartInfo } from './live.js';
 import { backupReminder, snoozeBackupReminder } from '../backup.js';
@@ -70,7 +70,7 @@ export function renderHome(el) {
           ${qs ? `
             <button type="button" class="quick-start" data-act="quick-start">
               <span class="qs-label">前回と同じ設定で開始</span>
-              <span class="qs-detail">${esc(qs.location)} · ${esc(fmtStake(qs.currency, qs.sb, qs.bb))}${qs.buyin ? ` · ${esc(fmtAmount(qs.buyin, qs.currency))}` : ''}</span>
+              <span class="qs-detail">${esc(qs.location)} · ${esc(fmtSessionStake(qs))}${qs.buyin ? ` · ${esc(fmtAmount(qs.buyin, qs.currency))}` : ''}</span>
             </button>` : ''}
           <a class="btn btn-ghost btn-block" href="#/sessions/new">${icons.plus}<span>終わったプレイを記録</span></a>
         </section>`}
@@ -105,7 +105,7 @@ export function renderHome(el) {
           <div class="summary-amount ${signClass(all.jpy.profit)}">${esc(fmtYen(all.jpy.profit))}</div>
           ${all.jpy.pending ? `<p class="summary-note"><span class="badge badge-warn">換算待ち${all.jpy.pending}件</span> 換算済み${all.jpy.count}件分の合計</p>` : ''}
           <div class="summary-meta">
-            <span>${all.count}セッション</span><span>${esc(fmtDuration(all.minutes))}</span><span class="${signClass(all.bbPerHour)}">${esc(fmtBBph(all.bbPerHour))}</span>
+            <span>${all.count}セッション</span><span>${esc(fmtDuration(all.minutes))}</span>${all.bbCount ? `<span class="${signClass(all.bbPerHour)}">${esc(fmtBBph(all.bbPerHour))}</span>` : all.jpy.roi != null ? `<span class="${signClass(all.jpy.roi)}">ROI ${esc(fmtPercent(all.jpy.roi))}</span>` : ''}
           </div>
         </a>
         <section>

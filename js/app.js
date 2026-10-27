@@ -1,7 +1,7 @@
 // アプリ本体：画面の切り替え、共通バナー、タブバー、タイマー表示の更新、オフライン対応
 import * as store from './store.js';
 import { autoResolve, onRateState } from './rates.js';
-import { esc, fmtElapsed, fmtStake } from './util.js';
+import { esc, fmtElapsed, fmtStake, fmtSessionStake } from './util.js';
 import { icons, toast } from './ui.js';
 import * as A from './actions.js';
 import { renderHome } from './views/home.js';
@@ -118,7 +118,7 @@ function renderChrome(route) {
       <a class="livebar status-${esc(a.status)}" href="${a.status === 'settling' ? '#/live/finish' : '#/'}">
         <span class="live-status"><span class="pulse"></span>${label}</span>
         <span class="livebar-time" data-tick="elapsed">${fmtElapsed(A.liveElapsedMs(a))}</span>
-        <span class="livebar-info">${esc(a.location)} · ${esc(fmtStake(a.currency, a.sb, a.bb))}</span>
+        <span class="livebar-info">${esc(a.location)} · ${esc(fmtSessionStake(a))}</span>
         <span class="chev">${icons.chevron}</span>
       </a>`;
   } else {

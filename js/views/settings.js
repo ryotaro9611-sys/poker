@@ -7,7 +7,7 @@ import { backupNow, hasUnbackedChanges } from '../backup.js';
 import { header, icons, toast, showError, confirmDialog, modal, busy } from '../ui.js';
 import { pendingNotice, bindPendingNotice } from './sessions.js';
 
-export const APP_VERSION = '1.2.7';
+export const APP_VERSION = '1.3.0';
 
 export function renderSettings(el) {
   const db = getDb();
@@ -58,6 +58,7 @@ export function renderSettings(el) {
           <li><b>終了して精算</b> …キャッシュアウト額を入力して保存。実プレイ時間・プレイ日は保存前に補正できます。</li>
           <li><b>過去のプレイ</b>は「終わったプレイを記録」または記録タブの「追加」から。</li>
           <li><b>タイムレーキ（別払い）</b>は、チップ以外から別に払った分だけ入力します。</li>
+          <li><b>定額卓（台湾式）</b>は、プレイ開始で「定額卓」とテーブル額（6,600 など）を選びます。料金は自動で計算し、追加バイインはボタン1回。精算ではキャッシュアウトを入れるだけです。</li>
           <li><b>成績</b>タブで全期間・期間指定・遠征を切り替え、円換算または各通貨で確認します。</li>
         </ol>
       </section>

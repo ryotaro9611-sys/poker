@@ -4,7 +4,7 @@ import {
   summarize, tripResult, cumulativeSeries, groupSummaries, stakeKey, locationKey, extremes, maxDrawdown,
 } from '../calc.js';
 import {
-  esc, fmtYen, fmtMoney, fmtDuration, fmtBB, fmtBBph, fmtHourly, fmtStake, fmtDate, fmtDateShort, signClass, todayYMD,
+  esc, fmtYen, fmtMoney, fmtDuration, fmtBB, fmtBBph, fmtHourly, fmtStake, fmtSessionStake, fmtDate, fmtDateShort, fmtPercent, signClass, todayYMD,
   CURRENCIES, CURRENCY_CODES,
 } from '../util.js';
 import { header, icons, emptyState, toast } from '../ui.js';
@@ -146,14 +146,16 @@ export function renderStats(el, { query } = {}) {
         <h3 class="card-title">主要指標</h3>
         <div class="stat-grid">
           <div class="stat stat-hl"><span class="stat-k">${isYen ? '円時給' : `時給（${esc(state.view)}）`}${isYen && sum.jpy.pending ? '<small>換算済み分</small>' : ''}</span><span class="stat-v ${signClass(hourly)}">${esc(fmtHourly(hourly, isYen ? 'JPY' : state.view))}</span></div>
-          <div class="stat stat-hl"><span class="stat-k">bb/時間</span><span class="stat-v ${signClass(sum.bbPerHour)}">${esc(fmtBBph(sum.bbPerHour))}</span></div>
-          <div class="stat"><span class="stat-k">獲得bb合計</span><span class="stat-v ${signClass(sum.bb)}">${esc(fmtBB(sum.bb))}</span></div>
+          <div class="stat stat-hl"><span class="stat-k">bb/時間</span><span class="stat-v ${signClass(sum.bbPerHour)}">${esc(fmtBBph(sum.bbPerHour))}</span>${sum.bbCount ? '' : '<span class="stat-sub">ブラインドの記録なし</span>'}</div>
+          <div class="stat"><span class="stat-k">獲得bb合計</span><span class="stat-v ${signClass(sum.bbCount ? sum.bb : null)}">${esc(fmtBB(sum.bbCount ? sum.bb : null))}</span></div>
           <div class="stat"><span class="stat-k">実プレイ時間</span><span class="stat-v">${esc(fmtDuration(sum.minutes))}</span></div>
           <div class="stat"><span class="stat-k">セッション数</span><span class="stat-v">${sum.count}件</span></div>
           <div class="stat"><span class="stat-k">勝ち / 負け</span><span class="stat-v">${sum.wins}勝 ${sum.losses}敗${sum.count - sum.wins - sum.losses ? ` ${sum.count - sum.wins - sum.losses}分` : ''}</span></div>
         </div>
-        <p class="muted small">時給・bb/時間は、各セッションの値の平均ではなく「合計 ÷ 合計時間」で計算しています。</p>
+        <p class="muted small">時給・bb/時間は、各セッションの値の平均ではなく「合計 ÷ 合計時間」で計算しています。${sum.bbCount === 0 ? 'ブラインドを記録した記録がないため、bb は計算していません（定額卓は下の「料金と ROI」で確認できます）。' : sum.bbCount < sum.count ? `bb はブラインドを記録した${sum.bbCount}件（${esc(fmtDuration(sum.bbMinutes))}）だけで計算し、定額卓など${sum.count - sum.bbCount}件は含めていません。` : ''}</p>
       </section>
+
+      ${feeCard(sum, isYen)}
 
       <section class="card">
         <h3 class="card-title">記録の振れ幅${isYen && sum.jpy.pending ? ' <small class="muted">換算待ちを除く</small>' : ''}</h3>
@@ -173,7 +175,7 @@ export function renderStats(el, { query } = {}) {
             ${Object.values(sum.byCurrency).map((c) => `
               <div class="cmp-row">
                 <div class="cmp-main"><span class="cmp-name">${esc(c.currency)}<small>${esc(CURRENCIES[c.currency].label)}</small></span><span class="cmp-amt ${signClass(c.profit)}">${esc(fmtMoney(c.profit, c.currency))}</span></div>
-                <div class="cmp-meta">${c.count}件<span class="dot-sep">·</span>${esc(fmtDuration(c.minutes))}<span class="dot-sep">·</span>${esc(fmtHourly(c.hourly, c.currency))}<span class="dot-sep">·</span>${esc(fmtBBph(c.bbPerHour))}</div>
+                <div class="cmp-meta">${c.count}件<span class="dot-sep">·</span>${esc(fmtDuration(c.minutes))}<span class="dot-sep">·</span>${esc(fmtHourly(c.hourly, c.currency))}<span class="dot-sep">·</span>${c.bbMinutes ? esc(fmtBBph(c.bbPerHour)) : `ROI ${esc(fmtPercent(c.roi))}`}</div>
               </div>`).join('')}
           </div>
         </section>` : ''}
@@ -259,7 +261,7 @@ function compareList(db, target, isYen) {
   if (state.compare === 'location') {
     groups = groupSummaries(target, locationKey, (s) => s.location.trim());
   } else if (state.compare === 'stake') {
-    groups = groupSummaries(target, stakeKey, (s) => fmtStake(s.currency, s.sb, s.bb));
+    groups = groupSummaries(target, stakeKey, (s) => fmtSessionStake(s));
     groups.forEach((g) => { g.currency = g.sessions[0].currency; });
   } else if (state.compare === 'trip') {
     groups = groupSummaries(target, (s) => s.tripId || 'none', (s) => {
@@ -319,7 +321,7 @@ function compareList(db, target, isYen) {
             </div>
             <div class="cmp-bar"><span class="${signClass(v)}" style="width:${w}%"></span></div>
             <div class="cmp-meta">
-              ${s.count}件<span class="dot-sep">·</span>${esc(fmtDuration(s.minutes))}<span class="dot-sep">·</span>${esc(fmtHourly(hr, isYen ? 'JPY' : state.view))}<span class="dot-sep">·</span>${esc(fmtBBph(s.bbPerHour))}
+              ${s.count}件<span class="dot-sep">·</span>${esc(fmtDuration(s.minutes))}<span class="dot-sep">·</span>${esc(fmtHourly(hr, isYen ? 'JPY' : state.view))}<span class="dot-sep">·</span>${s.bbMinutes ? esc(fmtBBph(s.bbPerHour)) : `ROI ${esc(fmtPercent(isYen ? s.jpy.roi : s.byCurrency[state.view]?.roi))}`}
               ${local ? `<span class="dot-sep">·</span>${esc(fmtMoney(local.profit, g.currency))}` : ''}
               ${isYen && s.jpy.pending ? `<span class="badge badge-warn">換算待ち${s.jpy.pending}件を除く</span>` : ''}
             </div>
@@ -338,4 +340,26 @@ function extremeStat(label, x, fmtV) {
       <span class="stat-v ${signClass(x.value)}">${esc(fmtV(x.value))}</span>
       <a class="stat-sub" href="#/sessions/${esc(x.session.id)}">${esc(fmtDateShort(x.session.date))} ${esc(x.session.location)}</a>
     </div>`;
+}
+
+/** 料金と ROI：料金を引く前と後の収支、料金の合計と回数、1時間あたりの料金、ROI */
+function feeCard(sum, isYen) {
+  const m = isYen ? sum.jpy : sum.byCurrency[state.view];
+  if (!m) return '';
+  const cur = isYen ? 'JPY' : state.view;
+  const fmtV = (v) => (isYen ? fmtYen(v) : fmtMoney(v, cur));
+  const hasFee = m.fee > 0 || m.rakeback > 0;
+  return `
+    <section class="card">
+      <h3 class="card-title">料金と ROI${isYen && sum.jpy.pending ? ' <small class="muted">換算待ちを除く</small>' : ''}</h3>
+      <div class="kv"><span class="k">料金を引く前の収支（卓上）</span><span class="v num ${signClass(m.tableProfit)}">${esc(fmtV(m.tableProfit))}</span></div>
+      <div class="kv"><span class="k">料金（${sum.feeCount}回）</span><span class="v num">${m.fee ? esc(fmtV(-m.fee)) : '0'}</span></div>
+      ${m.rakeback ? `<div class="kv"><span class="k">レーキバック</span><span class="v num pos">${esc(fmtV(m.rakeback))}</span></div>` : ''}
+      <div class="kv kv-total"><span class="k">料金を引いた収支</span><span class="v num ${signClass(m.profit)}">${esc(fmtV(m.profit))}</span></div>
+      <div class="stat-grid">
+        <div class="stat"><span class="stat-k">1時間あたりの料金</span><span class="stat-v">${hasFee ? esc(fmtHourly(m.feePerHour, cur).replace(/^[+]/, '')) : '—'}</span><span class="stat-sub">${hasFee ? 'レーキバック差し引き後' : '料金の記録なし'}</span></div>
+        <div class="stat"><span class="stat-k">ROI</span><span class="stat-v ${signClass(m.roi)}">${esc(fmtPercent(m.roi))}</span><span class="stat-sub">収支 ÷ 払った額（チップ代＋料金）</span></div>
+      </div>
+      <p class="muted small">料金は、定額卓の料金と、別払いしたタイムレーキの合計です。回数は、定額卓はバイイン回数、それ以外は料金を払ったセッション数です。</p>
+    </section>`;
 }

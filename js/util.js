@@ -5,6 +5,7 @@ export const CURRENCIES = {
   JPY: { code: 'JPY', label: '日本円', unit: '円' },
   PHP: { code: 'PHP', label: 'フィリピンペソ', unit: 'PHP' },
   KRW: { code: 'KRW', label: '韓国ウォン', unit: 'KRW' },
+  TWD: { code: 'TWD', label: '台湾ドル', unit: 'TWD' },
 };
 export const CURRENCY_CODES = Object.keys(CURRENCIES);
 
@@ -206,6 +207,16 @@ export function fmtRate(v) {
 }
 export function fmtStake(cur, sb, bb) {
   return `${cur} ${fmtNum(sb)}/${fmtNum(bb)}`;
+}
+/** 記録のレート表示：ブラインド制は「USD 2/5」、定額卓は「TWD 6,600卓」 */
+export function fmtSessionStake(s) {
+  return s.format === 'fixed' ? `${s.currency} ${fmtNum(s.table)}卓` : fmtStake(s.currency, s.sb, s.bb);
+}
+export function fmtPercent(x) {
+  if (x == null || !Number.isFinite(x)) return '—';
+  const v = x * 100;
+  const body = fmtNum(Math.abs(v), { maxFrac: 1 }) + '%';
+  return v > 1e-9 ? '+' + body : v < -1e-9 ? '−' + body : '±' + body;
 }
 export function fmtDuration(minutes) {
   if (minutes == null || !Number.isFinite(minutes)) return '—';

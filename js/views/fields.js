@@ -1,5 +1,6 @@
 // フォーム部品の共通化
-import { CURRENCIES, CURRENCY_CODES, esc, fmtDateRange, fmtNum, $$ } from '../util.js';
+import { CURRENCIES, CURRENCY_CODES, esc, fmtDateRange, fmtNum, fmtInput, parseNumber, $$ } from '../util.js';
+import { FIXED_TABLES, defaultFee, fixedAmounts } from '../calc.js';
 import { CONDITIONS, TAGS } from '../tags.js';
 
 export function tripOptions(db, selected) {
@@ -30,7 +31,7 @@ export function currencyField(selected) {
   return `
     <fieldset class="field">
       <legend class="field-label">通貨</legend>
-      <div class="seg seg-4" role="radiogroup">
+      <div class="seg seg-5" role="radiogroup">
         ${CURRENCY_CODES.map((c) => `
           <label class="seg-item">
             <input type="radio" name="currency" value="${c}" ${c === selected ? 'checked' : ''}>
@@ -188,4 +189,139 @@ export function attachNumberFormatting(form) {
 
 export function unitOf(cur) {
   return cur === 'JPY' ? '円' : cur;
+}
+
+/* ---------------- 記録の方式：ブラインド制／定額卓（台湾式） ---------------- */
+
+export function formatField(selected) {
+  const fixed = selected === 'fixed';
+  return `
+    <fieldset class="field">
+      <legend class="field-label">記録の方式</legend>
+      <div class="seg seg-2 format-seg" role="radiogroup">
+        <label class="seg-item"><input type="radio" name="format" value="blind" ${fixed ? '' : 'checked'}><span><b>ブラインド制</b><small>SB/BB のテーブル</small></span></label>
+        <label class="seg-item"><input type="radio" name="format" value="fixed" ${fixed ? 'checked' : ''}><span><b>定額卓</b><small>台湾式（6,600卓など）</small></span></label>
+      </div>
+    </fieldset>`;
+}
+
+/** 方式ごとの入力欄を包む。使わない方は隠して無効にする（値が送信されない） */
+export function modeBox(mode, inner) {
+  return `<fieldset class="mode-box" data-mode="${mode}">${inner}</fieldset>`;
+}
+
+/** 料金の欄の表示値：初期値（1/11）と同じなら空欄（＝自動） */
+export function feeInputValue(table, fee) {
+  if (fee == null || table == null) return '';
+  return fee === defaultFee(table) ? '' : fmtInput(fee);
+}
+
+/** 定額卓の入力欄：テーブル額（ボタン5つ＋直接入力）・1回あたりの料金・（記録では）バイイン回数 */
+export function fixedFields({ table = '', fee = '', count = '1', unit = 'TWD', withCount = true }) {
+  return `
+    <div class="field">
+      <span class="field-label">テーブル（1回に払う額）</span>
+      <div class="chips table-chips" role="group" aria-label="テーブル">
+        ${FIXED_TABLES.map((t) => `<button type="button" class="chip" data-table="${t}" aria-pressed="false">${fmtNum(t)}</button>`).join('')}
+      </div>
+      <span class="input-wrap"><input class="input num" type="text" inputmode="decimal" name="table" value="${esc(table)}" placeholder="6,600" autocomplete="off" aria-label="テーブルの額"><span class="input-suffix" data-unit>${esc(unit)}</span></span>
+      <span class="field-error" data-err="table"></span>
+    </div>
+    <label class="field">
+      <span class="field-label">料金（1回あたり）</span>
+      <span class="input-wrap"><input class="input num" type="text" inputmode="decimal" name="feePerBuyin" value="${esc(fee)}" placeholder="自動" autocomplete="off" data-fee-input><span class="input-suffix" data-unit>${esc(unit)}</span></span>
+      <span class="field-hint">空欄ならテーブル額の 1/11（チップの10%）。違うときだけ入れてください。</span>
+      <span class="field-error" data-err="feePerBuyin"></span>
+    </label>
+    ${withCount ? `
+      <div class="field">
+        <span class="field-label">バイイン回数（買い足しも1回）</span>
+        <div class="stepper">
+          <button type="button" class="btn btn-ghost stepper-btn" data-count-step="-1" aria-label="1回減らす">−</button>
+          <input class="input num stepper-input" type="text" inputmode="numeric" name="buyinCount" value="${esc(count)}" autocomplete="off" aria-label="バイイン回数">
+          <button type="button" class="btn btn-ghost stepper-btn" data-count-step="1" aria-label="1回増やす">＋</button>
+        </div>
+        <span class="field-error" data-err="buyinCount"></span>
+      </div>` : ''}
+    <p class="fixed-summary" data-fixed-summary aria-live="polite"></p>`;
+}
+
+/** 定額卓の内訳（チップ代・料金）を表示する */
+export function updateFixedSummary(form) {
+  const box = form.querySelector('[data-fixed-summary]');
+  if (!box) return;
+  const tableIn = form.querySelector('[name="table"]');
+  const t = parseNumber(tableIn ? tableIn.value : '');
+  form.querySelectorAll('[data-table]').forEach((b) => {
+    const on = t.ok && Number(b.dataset.table) === t.value;
+    b.classList.toggle('chip-on', on);
+    b.setAttribute('aria-pressed', String(on));
+  });
+  const feeIn = form.querySelector('[name="feePerBuyin"]');
+  if (!t.ok || !(t.value > 0)) { box.textContent = 'テーブルを選ぶと、チップ代と料金の内訳を表示します'; return; }
+  if (feeIn) feeIn.placeholder = `自動（${fmtNum(defaultFee(t.value))}）`;
+  const f = parseNumber(feeIn ? feeIn.value : '', { allowEmpty: true });
+  const fee = f.ok ? (f.value ?? defaultFee(t.value)) : null;
+  const countIn = form.querySelector('[name="buyinCount"]');
+  const c = countIn ? parseNumber(countIn.value, { integer: true }) : { ok: true, value: 1 };
+  if (fee == null || fee >= t.value || !c.ok || !(c.value >= 1)) { box.textContent = ''; return; }
+  const cur = form.querySelector('[name="currency"]:checked')?.value || '';
+  const one = fixedAmounts(t.value, fee, 1);
+  const all = fixedAmounts(t.value, fee, c.value);
+  box.innerHTML = c.value > 1
+    ? `<b>${c.value}回で ${esc(fmtNum(t.value * c.value))} ${esc(cur)}</b>　チップ ${esc(fmtNum(all.buyin))} ＋ 料金 ${esc(fmtNum(all.timeRake))}`
+    : `<b>1回あたり</b>　チップ ${esc(fmtNum(one.buyin))} ＋ 料金 ${esc(fmtNum(one.timeRake))}`;
+}
+
+/**
+ * 方式の切り替えと、定額卓のボタン操作をまとめて扱う。
+ * onChange(fixed) は方式が切り替わったときに呼ばれる。
+ */
+export function bindFormatMode(form, onChange) {
+  const apply = (fromUser) => {
+    const fixed = form.querySelector('[name="format"]:checked')?.value === 'fixed';
+    form.querySelectorAll('[data-mode]').forEach((box) => {
+      const on = box.dataset.mode === (fixed ? 'fixed' : 'blind');
+      box.hidden = !on;
+      box.disabled = !on;
+    });
+    updateFixedSummary(form);
+    if (onChange) onChange(fixed, fromUser);
+  };
+  form.addEventListener('change', (e) => { if (e.target.name === 'format') apply(true); });
+  form.addEventListener('input', (e) => {
+    if (['table', 'feePerBuyin', 'buyinCount', 'currency'].includes(e.target.name)) updateFixedSummary(form);
+  });
+  form.addEventListener('click', (e) => {
+    const tb = e.target.closest('[data-table]');
+    if (tb) {
+      form.querySelector('[name="table"]').value = fmtInput(Number(tb.dataset.table));
+      form.querySelector('[name="table"]').dispatchEvent(new Event('input', { bubbles: true }));
+      return;
+    }
+    const st = e.target.closest('[data-count-step]');
+    if (st) {
+      const input = form.querySelector('[name="buyinCount"]');
+      const cur = parseNumber(input.value, { integer: true });
+      const next = Math.min(999, Math.max(1, (cur.ok && cur.value ? cur.value : 1) + Number(st.dataset.countStep)));
+      input.value = String(next);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  });
+  apply(false);
+}
+
+/** レーキバック（受け取った分）の折りたたみ欄 */
+export function rakebackField(value, unit) {
+  const open = !!(value && parseNumber(value).value > 0);
+  return `
+    <details class="disclosure" ${open ? 'open' : ''}>
+      <summary><span>レーキバック（受け取った分）</span><span class="disclosure-value" data-rb-summary>${open ? '' : 'なし'}</span></summary>
+      <label class="field">
+        <span class="field-label">受け取ったレーキバック（現金）</span>
+        <span class="input-wrap"><input class="input num" type="text" inputmode="decimal" name="rakeback" value="${esc(value)}" placeholder="0" autocomplete="off"><span class="input-suffix" data-unit>${esc(unit)}</span></span>
+        <span class="field-hint">払った料金から戻ってきた分。<b>チップで受け取った分はキャッシュアウトに含まれるので入れません。</b>後でまとめて受け取ったときは、受け取った日の記録に入れてください。</span>
+        <span class="field-error" data-err="rakeback"></span>
+      </label>
+    </details>`;
 }

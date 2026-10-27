@@ -625,3 +625,21 @@ a.stat-sub { color: var(--text-2); text-decoration: underline; text-decoration-c
 .repair-notice > div span { display: block; }
 .check-field { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border-radius: 12px; background: var(--warn-soft); border: 1px solid rgba(227, 184, 102, 0.3); font-size: 14px; cursor: pointer; }
 .check-field input { width: 20px; height: 20px; margin: 1px 0 0; accent-color: var(--accent); flex: none; }
+
+/* ---------- v1.3 台湾（定額卓） ---------- */
+.mode-box { border: 0; margin: 0; padding: 0; min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+.mode-box[hidden] { display: none; }
+.format-seg .seg-item span { min-height: 60px; }
+.format-seg .seg-item b { font-size: 15px; letter-spacing: 0.02em; }
+.format-seg .seg-item small { display: block !important; font-size: 11px; }
+.table-chips .chip { min-height: 42px; padding: 0 14px; font-size: 15px; font-weight: 600; }
+.stepper { display: grid; grid-template-columns: 56px 1fr 56px; gap: 8px; align-items: center; }
+.stepper-btn { min-height: 50px; padding: 0; font-size: 24px; font-weight: 500; }
+.stepper-input { text-align: center; }
+.fixed-summary { margin: 0; padding: 10px 14px; border-radius: 12px; background: rgba(255, 255, 255, 0.03); font-size: 13px; color: var(--text-2); font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+.fixed-summary b { color: var(--text); margin-right: 4px; }
+.fixed-summary:empty { display: none; }
+.preview-rows { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; font-size: 13px; color: var(--text-2); margin-bottom: 6px; font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+.preview-rows span:nth-child(even) { text-align: right; }
+.seg-5 .seg-item small { white-space: nowrap; }
+.kv-sub .k { color: var(--text-3); font-size: 13px; }

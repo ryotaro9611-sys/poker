@@ -2,14 +2,15 @@
 import { getDb, modeGeneration } from '../store.js';
 import * as A from '../actions.js';
 import { resolvePending } from '../rates.js';
-import { validateSession, sessionProfit } from '../calc.js';
+import { validateSession, sessionProfit, sessionTableProfit, sessionPaid, sessionBB } from '../calc.js';
 import {
-  esc, todayYMD, fmtMoney, fmtBB, fmtHourly, fmtDuration, fmtInput, fmtTimeInTz, debounce, signClass, parseNumber, onLeave,
+  esc, todayYMD, fmtMoney, fmtBB, fmtHourly, fmtDuration, fmtInput, fmtTimeInTz, fmtPercent, debounce, signClass, parseNumber, onLeave,
 } from '../util.js';
 import { header, toast, showError, busy, confirmDialog, icons } from '../ui.js';
 import {
   tripField, currencyField, textField, amountField, stakeFields, durationField, chipsHtml,
   readForm, showErrors, clearErrors, attachNumberFormatting, unitOf, conditionField, tagsField, bindConditionClear, handleTripMissing,
+  formatField, modeBox, fixedFields, feeInputValue, bindFormatMode, rakebackField,
 } from './fields.js';
 
 function splitMinutes(m) {
@@ -21,15 +22,18 @@ function initialValues(db, mode, { session, active, presetTrip }) {
   if (mode === 'finish') {
     const a = active;
     const elapsedMin = Math.max(1, Math.round(A.liveElapsedMs(a, a.endedAt || Date.now()) / 60000));
+    const fixedLive = a.format === 'fixed';
     const auto = {
       tripId: a.tripId || '', date: a.date, location: a.location, currency: a.currency,
       sb: fmtInput(a.sb), bb: fmtInput(a.bb), ...splitMinutes(elapsedMin),
       buyin: fmtInput(A.liveBuyinTotal(a)), cashout: '', timeRake: '', note: '', condition: a.condition ?? '', tags: [],
+      format: fixedLive ? 'fixed' : 'blind', rakeback: '',
+      table: fixedLive ? fmtInput(a.table) : '', feePerBuyin: fixedLive ? feeInputValue(a.table, a.feePerBuyin) : '', buyinCount: fixedLive ? String(a.buyins.length) : '1',
     };
     if (a.draft) {
       const v = { ...auto, ...a.draft };
       if (!a.draft.durationEdited) Object.assign(v, splitMinutes(elapsedMin));
-      if (!a.draft.buyinEdited) v.buyin = auto.buyin;
+      if (!a.draft.buyinEdited) Object.assign(v, { buyin: auto.buyin, buyinCount: auto.buyinCount });
       return { values: v, restored: true };
     }
     return { values: auto, restored: false };
@@ -42,18 +46,23 @@ function initialValues(db, mode, { session, active, presetTrip }) {
       tripId: s.tripId || '', date: s.date, location: s.location, currency: s.currency,
       sb: fmtInput(s.sb), bb: fmtInput(s.bb), ...splitMinutes(s.minutes),
       buyin: fmtInput(s.buyin), cashout: fmtInput(s.cashout), timeRake: s.timeRake ? fmtInput(s.timeRake) : '', note: s.note || '', condition: s.condition ?? '', tags: s.tags || [],
+      format: s.format === 'fixed' ? 'fixed' : 'blind', rakeback: s.rakeback ? fmtInput(s.rakeback) : '',
+      table: s.format === 'fixed' ? fmtInput(s.table) : '', feePerBuyin: s.format === 'fixed' ? feeInputValue(s.table, s.feePerBuyin) : '', buyinCount: s.format === 'fixed' ? String(s.buyinCount) : '1',
     };
     return draft ? { values: { ...base, ...draft }, restored: true } : { values: base, restored: false };
   }
   if (draft) return { values: draft, restored: true };
   const cur = db.prefs.lastCurrency || 'USD';
   const st = (db.prefs.stakes || {})[cur];
+  const fx = (db.prefs.fixed || {})[cur] || (db.prefs.fixed || {}).TWD || null;
   const date = todayYMD();
   return {
     values: {
       tripId: presetTrip && db.trips.some((t) => t.id === presetTrip) ? presetTrip : A.defaultTripId(db, date), date, location: db.prefs.lastLocation || '', currency: cur,
       sb: st ? fmtInput(st.sb) : '', bb: st ? fmtInput(st.bb) : '', hours: '', mins: '',
       buyin: '', cashout: '', timeRake: '', note: '', condition: '', tags: [],
+      format: db.prefs.lastFormat === 'fixed' ? 'fixed' : 'blind', rakeback: '',
+      table: fx ? fmtInput(fx.table) : '6,600', feePerBuyin: fx ? feeInputValue(fx.table, fx.fee) : '', buyinCount: '1',
     },
     restored: false,
   };
@@ -151,7 +160,9 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
         ${mode === 'finish' ? `
           <section class="card form-card form-card-accent">
             ${amountField({ name: 'cashout', label: '合計キャッシュアウト', value: v.cashout, unit: unitOf(v.currency), big: true, hint: '最後に持ち帰ったチップの合計額（回収0なら0）' })}
-            ${amountField({ name: 'buyin', label: '合計バイイン（リバイ・追加購入込み）', value: v.buyin, unit: unitOf(v.currency), hint: 'プレイ中に記録した額を自動入力しています' })}
+            ${modeBox('blind', amountField({ name: 'buyin', label: '合計バイイン（リバイ・追加購入込み）', value: v.buyin, unit: unitOf(v.currency), hint: 'プレイ中に記録した額を自動入力しています' }))}
+            ${modeBox('fixed', fixedFields({ table: v.table, fee: v.feePerBuyin, count: v.buyinCount, unit: unitOf(v.currency), withCount: true }))}
+            ${rakebackField(v.rakeback, unitOf(v.currency))}
             <div class="preview" data-preview></div>
           </section>
           ${reviewHtml}` : ''}
@@ -168,27 +179,31 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
           ${textField({ name: 'location', label: '場所・店舗名', value: v.location, placeholder: '例：Club A', list: 'loc-list' })}
           <datalist id="loc-list">${A.recentLocations(db, 20).map((l) => `<option value="${esc(l)}">`).join('')}</datalist>
           <div class="chips" data-loc-chips>${chipsHtml(A.recentLocations(db, 5).map((l) => ({ label: l, data: { location: l } })))}</div>
+          ${formatField(v.format)}
           ${currencyField(v.currency)}
-          ${stakeFields(v.sb, v.bb)}
+          ${modeBox('blind', stakeFields(v.sb, v.bb))}
           ${durationField(v.hours, v.mins, mode === 'finish' ? (a && A.liveElapsedMs(a, a.endedAt || Date.now()) > 12 * 3600e3 ? '<b class="warn-text">タイマーが12時間を超えています。止め忘れの場合は実際の実プレイ時間に直してください。</b>' : 'タイマーの計測値（休憩を除く）。補正する場合は書き換えてください。') : '')}
         </section>
 
         ${mode !== 'finish' ? `
           <section class="card form-card">
-            ${amountField({ name: 'buyin', label: '合計バイイン（リバイ・追加購入込み）', value: v.buyin, unit: unitOf(v.currency) })}
+            ${modeBox('blind', amountField({ name: 'buyin', label: '合計バイイン（リバイ・追加購入込み）', value: v.buyin, unit: unitOf(v.currency) }))}
+            ${modeBox('fixed', fixedFields({ table: v.table, fee: v.feePerBuyin, count: v.buyinCount, unit: unitOf(v.currency), withCount: true }))}
             ${amountField({ name: 'cashout', label: '合計キャッシュアウト', value: v.cashout, unit: unitOf(v.currency), hint: '回収0の場合は0を入力' })}
+            ${rakebackField(v.rakeback, unitOf(v.currency))}
             <div class="preview" data-preview></div>
           </section>
           ${reviewHtml}` : ''}
 
         <section class="card form-card">
+          ${modeBox('blind', `
           <details class="disclosure" ${trOpen ? 'open' : ''}>
             <summary>
               <span>タイムレーキ（別払い）</span>
               <span class="disclosure-value" data-tr-summary></span>
             </summary>
             ${amountField({ name: 'timeRake', label: '別払いしたタイムレーキの合計', value: v.timeRake, unit: unitOf(v.currency), hint: '手持ち現金など<b>チップ以外から別払いした分だけ</b>を入力します。チップから払った分（キャッシュアウトに反映済み）やポットから引かれたレーキは入力しないでください。' })}
-          </details>
+          </details>`)}
           <label class="field">
             <span class="field-label">メモ（任意）</span>
             <textarea class="input" name="note" rows="2" maxlength="500" placeholder="卓の様子など">${esc(v.note)}</textarea>
@@ -215,13 +230,21 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
   const form = el.querySelector('form');
   attachNumberFormatting(form);
   bindConditionClear(form, () => saveDraft());
+  // 方式の切り替え：定額卓に切り替えたら、通貨は台湾ドルを提案する（変更は自由）
+  bindFormatMode(form, (fixed, fromUser) => {
+    if (fixed && fromUser) {
+      const twd = form.querySelector('input[name="currency"][value="TWD"]');
+      if (twd && !twd.checked) { twd.checked = true; twd.dispatchEvent(new Event('input', { bubbles: true })); }
+    }
+    if (fromUser) { refreshPreview(); saveDraft(); }
+  });
   const cur = () => form.querySelector('[name="currency"]:checked')?.value || 'USD';
 
   function refreshCurrency() {
     const c = cur();
     form.querySelectorAll('[data-unit]').forEach((u) => { u.textContent = unitOf(c); });
     const chips = form.querySelector('[data-stake-chips]');
-    chips.innerHTML = chipsHtml(A.recentStakes(getDb(), c).map((s) => ({ label: `${s.sb}/${s.bb}`, data: { sb: s.sb, bb: s.bb } })));
+    if (chips) chips.innerHTML = chipsHtml(A.recentStakes(getDb(), c).map((s) => ({ label: `${s.sb}/${s.bb}`, data: { sb: s.sb, bb: s.bb } })));
   }
 
   function refreshPreview() {
@@ -230,18 +253,34 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
     const box = form.querySelector('[data-preview]');
     const trBox = form.querySelector('[data-tr-summary]');
     const tr = parseNumber(raw.timeRake, { allowEmpty: true });
-    trBox.textContent = tr.ok && tr.value ? fmtMoney(-tr.value, raw.currency) : '0（初期値）';
-    const need = ['buyin', 'cashout', 'bb', 'sb'];
+    if (trBox) trBox.textContent = tr.ok && tr.value ? fmtMoney(-tr.value, raw.currency) : '0（初期値）';
+    const rbBox = form.querySelector('[data-rb-summary]');
+    const rbv = parseNumber(raw.rakeback, { allowEmpty: true });
+    if (rbBox) rbBox.textContent = rbv.ok && rbv.value ? fmtMoney(rbv.value, raw.currency) : 'なし';
+    const need = ['buyin', 'cashout', 'bb', 'sb', 'table', 'feePerBuyin', 'buyinCount', 'rakeback', 'timeRake'];
     if (need.some((k) => r.errors[k]) || raw.cashout === '') {
       box.innerHTML = '<span class="muted">金額を入力すると収支を表示します</span>';
       return;
     }
-    const p = sessionProfit(r.value);
-    const bbw = p / r.value.bb;
-    const hourly = r.value.minutes ? fmtHourly(p / (r.value.minutes / 60), raw.currency) : '—';
+    const sv = r.value;
+    const p = sessionProfit(sv);
+    const cur = raw.currency;
+    const hourly = sv.minutes ? fmtHourly(p / (sv.minutes / 60), cur) : '—';
+    const bbw = sessionBB(sv);
+    const fee = sv.timeRake || 0;
+    const rb = sv.rakeback || 0;
+    // 料金やレーキバックがあるときは、卓上の収支からの内訳を出す
+    const rows = fee || rb ? `
+      <div class="preview-rows">
+        <span>卓上の収支</span><span>${esc(fmtMoney(sessionTableProfit(sv), cur))}</span>
+        ${fee ? `<span>${sv.format === 'fixed' ? `料金（${sv.buyinCount}回）` : 'タイムレーキ（別払い）'}</span><span>${esc(fmtMoney(-fee, cur))}</span>` : ''}
+        ${rb ? `<span>レーキバック</span><span>${esc(fmtMoney(rb, cur))}</span>` : ''}
+      </div>` : '';
+    const paid = sessionPaid(sv);
     box.innerHTML = `
-      <div class="preview-main ${signClass(p)}">${esc(fmtMoney(p, raw.currency))}</div>
-      <div class="preview-sub">${esc(fmtBB(bbw))}<span class="dot-sep">·</span>${esc(hourly)}${r.value.timeRake ? `<span class="dot-sep">·</span>別払いレーキ控除後` : ''}</div>`;
+      ${rows}
+      <div class="preview-main ${signClass(p)}">${esc(fmtMoney(p, cur))}</div>
+      <div class="preview-sub">${bbw != null ? `${esc(fmtBB(bbw))}<span class="dot-sep">·</span>` : ''}${esc(hourly)}${paid > 0 ? `<span class="dot-sep">·</span>ROI ${esc(fmtPercent(p / paid))}` : ''}</div>`;
   }
 
   function refreshRateNote() {
@@ -286,7 +325,7 @@ export function renderSessionForm(el, { mode, id, presetTrip }) {
       if (t) form.tripId.value = t.id;
     }
     if (n === 'hours' || n === 'mins') durationEdited = true;
-    if (n === 'buyin') buyinEdited = true;
+    if (n === 'buyin' || n === 'buyinCount' || n === 'table' || n === 'feePerBuyin') buyinEdited = true;
     if (n === 'currency') refreshCurrency();
     if (e.target.getAttribute('aria-invalid')) {
       e.target.removeAttribute('aria-invalid');

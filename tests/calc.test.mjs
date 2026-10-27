@@ -5,6 +5,7 @@ import { validateData } from '../js/schema.js';
 import {
   sessionProfit, sessionProfitJPY, sessionBB, summarize, tripResult, cumulativeSeries,
   validateSession, validateTrip, groupSummaries, stakeKey, extremes, maxDrawdown, tripMetrics,
+  defaultFee, sessionTableProfit, sessionPaid, sessionFeeCount, FIXED_TABLES,
 } from '../js/calc.js';
 import { parseNumber, fmtMoney, fmtYen, fmtBBph, fmtHourly, addDaysYMD, toInputInTz, fromInputInTz, ymdInTz } from '../js/util.js';
 
@@ -300,6 +301,107 @@ t('N2：修復済みのデータを書き出したバックアップは、その
   assert.ok(repaired.active.repairs.some((m) => m.includes('プレイ日')), '新しい修復の知らせは残す');
   const restored = validateData(JSON.parse(JSON.stringify(repaired)), { strict: true });
   assert.deepEqual(restored.problems, [], '書き出し→復元が通る');
+});
+
+/* ---------- 台湾（定額卓・TWD・レーキバック） ---------- */
+const fixedRaw = { format: 'fixed', date: '2026-10-30', location: 'Taipei Club', currency: 'TWD', table: '6,600', feePerBuyin: '', buyinCount: '1', sb: '', bb: '', hours: '3', mins: '', cashout: '9,900', rakeback: '' };
+
+t('定額卓：テーブル額の 1/11 が料金（チップの10%）', () => {
+  assert.deepEqual(FIXED_TABLES.map(defaultFee), [300, 600, 1000, 2000, 3000]);
+});
+
+t('定額卓：6,600 を払って 9,900 で換金 → 卓上+3,900・料金600・収支+3,300・ROI+50%', () => {
+  const r = validateSession(fixedRaw);
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  const s = { ...r.value, rate: { value: 4.8, date: '2026-10-30', manual: true, source: 'x' } };
+  assert.equal(s.buyin, 6000);
+  assert.equal(s.timeRake, 600);
+  assert.equal(s.sb, null);
+  assert.equal(s.bb, null);
+  assert.equal(sessionTableProfit(s), 3900);
+  assert.equal(sessionProfit(s), 3300);
+  assert.equal(sessionPaid(s), 6600);
+  assert.equal(sessionFeeCount(s), 1);
+  assert.equal(sessionBB(s), null, 'ブラインドなしは bb なし');
+  const sum = summarize([s]);
+  close(sum.byCurrency.TWD.roi, 0.5, 'ROI');
+  assert.equal(sum.jpy.profit, 15840);
+  assert.equal(sum.jpy.fee, 2880);
+  close(sum.jpy.feePerHour, 960, '1時間あたりの料金（円）');
+  assert.equal(sum.bbPerHour, null);
+});
+
+t('定額卓：買い足し2回目・料金の手直し・レーキバック', () => {
+  const r = validateSession({ ...fixedRaw, buyinCount: '2', feePerBuyin: '500', cashout: '20,000', rakeback: '300' });
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  assert.equal(r.value.buyin, 12200); // (6,600−500)×2
+  assert.equal(r.value.timeRake, 1000);
+  assert.equal(r.value.rakeback, 300);
+  assert.equal(sessionProfit(r.value), 20000 - 12200 - 1000 + 300);
+  assert.equal(sessionFeeCount(r.value), 2);
+  const sum = summarize([{ ...r.value, rate: null }]);
+  assert.equal(sum.byCurrency.TWD.netFee, 700, '料金からレーキバックを引いた実質の料金');
+});
+
+t('定額卓：入力の誤り', () => {
+  assert.ok(validateSession({ ...fixedRaw, table: '0' }).errors.table);
+  assert.ok(validateSession({ ...fixedRaw, feePerBuyin: '6,600' }).errors.feePerBuyin);
+  assert.ok(validateSession({ ...fixedRaw, buyinCount: '0' }).errors.buyinCount);
+  assert.ok(validateSession({ ...fixedRaw, buyinCount: '1.5' }).errors.buyinCount);
+  assert.ok(validateSession({ ...fixedRaw, sb: '25', bb: '' }).errors.bb, 'SB だけは不可');
+  assert.equal(validateSession({ ...fixedRaw, sb: '25', bb: '50' }).value.bb, 50, 'ブラインドを入れれば bb も出せる');
+});
+
+t('bb/時間はブラインドを記録した分の時間で割る（定額卓を混ぜても薄まらない）', () => {
+  const fixed = { ...validateSession(fixedRaw).value, rate: null };
+  const sum = summarize([S[0], fixed]); // 4/1：+48bb・5時間
+  close(sum.bbPerHour, 9.6, 'bb/時間');
+  assert.equal(sum.bbCount, 1);
+  assert.equal(sum.minutes, 480);
+});
+
+t('レート別の比較：定額卓はテーブル額ごと', () => {
+  const a = validateSession(fixedRaw).value;
+  const b = validateSession({ ...fixedRaw, table: '11,000' }).value;
+  assert.notEqual(stakeKey(a), stakeKey(b));
+  assert.equal(stakeKey(a), 'TWD|fixed|6600');
+});
+
+t('ブラインド制はこれまでと同じ（レーキバック欄を空けても結果は変わらない）', () => {
+  const ok = { date: '2026-04-01', location: 'A', currency: 'USD', sb: '2', bb: '5', hours: '5', mins: '', buyin: '500', cashout: '750', timeRake: '10', rakeback: '' };
+  const r = validateSession(ok);
+  assert.equal(r.value.format, 'blind');
+  assert.equal(r.value.rakeback, 0);
+  assert.equal(sessionProfit(r.value), 240);
+  assert.equal(r.value.table, null);
+});
+
+t('保存データの検査：定額卓の記録・進行中タイマーを受け付け、往復できる', () => {
+  const v = validateSession({ ...fixedRaw, buyinCount: '2', rakeback: '300' }).value;
+  const session = { id: 'tw1', ...v, tripId: null, rate: null, createdAt: 1, updatedAt: 1 };
+  const now = Date.now();
+  const active = { id: 'tw-live', tripId: null, location: 'Taipei Club', currency: 'TWD', sb: null, bb: null, format: 'fixed', table: 6600, feePerBuyin: 600, date: '2026-10-30', tz: 'Asia/Taipei', startedAt: now - 3600e3, segments: [{ s: now - 3600e3, e: null }], status: 'playing', buyins: [{ amount: 6000, fee: 600, at: now - 3600e3 }], draft: { format: 'fixed', table: '6,600', buyinCount: '1', rakeback: '' }, rev: 0 };
+  const db = { trips: [], sessions: [session], active, drafts: {}, prefs: { lastFormat: 'fixed', fixed: { TWD: { table: 6600, fee: 600 } } }, rateCache: {} };
+  const r = validateData(db, { strict: true });
+  assert.deepEqual(r.problems, []);
+  assert.equal(r.data.sessions[0].format, 'fixed');
+  assert.equal(r.data.sessions[0].rakeback, 300);
+  assert.equal(r.data.active.buyins[0].fee, 600);
+  assert.deepEqual(r.data.prefs.fixed.TWD, { table: 6600, fee: 600 });
+  const again = validateData(JSON.parse(JSON.stringify(r.data)), { strict: true });
+  assert.deepEqual(again.problems, [], '書き出し→復元の往復');
+  // 壊れた定額卓は拒否
+  for (const bad of [{ table: 0 }, { feePerBuyin: 7000 }, { buyinCount: 0 }, { format: 'other' }, { rakeback: -1 }, { sb: 25, bb: null }]) {
+    assert.equal(validateData({ ...db, active: null, sessions: [{ ...session, ...bad }] }, { strict: true }).data, null, JSON.stringify(bad));
+  }
+});
+
+t('保存データの検査：旧版の記録（方式の項目なし）はブラインド制として、そのまま通る', () => {
+  const r = validateData(JSON.parse(JSON.stringify(db)), { strict: true });
+  assert.deepEqual(r.problems, []);
+  assert.equal(r.data.sessions.length, 8);
+  assert.ok(r.data.sessions.every((s) => s.format === undefined && s.bb > 0));
+  assert.equal(summarize(r.data.sessions).jpy.profit, 71120, 'デモの合計は変わらない');
 });
 
 console.log(`\n${n} tests passed${failed ? `, ${failed} failed` : ''}`);

@@ -37,6 +37,29 @@ function checkStake(o) {
   return isNum(o.sb) && o.sb >= 0 && isNum(o.bb) && o.bb > 0 && o.sb <= o.bb && o.bb <= MAX_NUMBER;
 }
 
+/**
+ * 記録の方式。方式の項目がない記録（旧版）はブラインド制。
+ * 定額卓（台湾式）はテーブル額・1回あたりの料金（記録では回数も）を持ち、ブラインドは任意。
+ * 収支に関わるため、壊れていれば記録ごと不正とする。
+ */
+function checkFormat(o, ctx, { withCount }) {
+  if (o.format == null || o.format === 'blind') {
+    if (!checkStake(o)) ctx.fail('レート（SB/BB）が不正です');
+    return { ...(o.format === 'blind' ? { format: 'blind' } : {}), sb: o.sb, bb: o.bb };
+  }
+  if (o.format !== 'fixed') ctx.fail('記録の方式が不正です');
+  const noBlinds = o.sb == null && o.bb == null;
+  if (!noBlinds && !checkStake(o)) ctx.fail('レート（SB/BB）が不正です');
+  if (!(isNum(o.table) && o.table > 0 && o.table <= MAX_NUMBER)) ctx.fail('テーブルの額が不正です');
+  if (!(isNum(o.feePerBuyin) && o.feePerBuyin >= 0 && o.feePerBuyin < o.table)) ctx.fail('料金が不正です');
+  const out = { format: 'fixed', sb: noBlinds ? null : o.sb, bb: noBlinds ? null : o.bb, table: o.table, feePerBuyin: o.feePerBuyin };
+  if (withCount) {
+    if (!(Number.isInteger(o.buyinCount) && o.buyinCount >= 1 && o.buyinCount <= 999)) ctx.fail('バイイン回数が不正です');
+    out.buyinCount = o.buyinCount;
+  }
+  return out;
+}
+
 function checkRate(r, currency, playDate, ctx) {
   if (r == null || currency === 'JPY') return null;
   const ok = isObj(r) && isNum(r.value) && r.value > 0 && r.value <= MAX_NUMBER && isValidYMD(r.date) && r.date <= playDate;
@@ -106,13 +129,15 @@ function checkSession(s, tripIds, ctx) {
   // 収支そのものに関わる項目：壊れていれば記録ごと除外（推測で埋めない）
   if (!isValidYMD(s.date)) ctx.fail('プレイ日が不正です');
   if (!CURRENCY_CODES.includes(s.currency)) ctx.fail('通貨が不正です');
-  if (!checkStake(s)) ctx.fail('レート（SB/BB）が不正です');
+  const fmt = checkFormat(s, ctx, { withCount: true });
   if (!(Number.isInteger(s.minutes) && s.minutes > 0 && s.minutes <= MAX_MINUTES)) ctx.fail('実プレイ時間が不正です');
   if (!isAmount(s.buyin) || !isAmount(s.cashout)) ctx.fail('金額が不正です');
   if (s.timeRake != null && !isAmount(s.timeRake)) ctx.fail('タイムレーキが不正です');
+  if (s.rakeback != null && !isAmount(s.rakeback)) ctx.fail('レーキバックが不正です');
   const out = {
     id: s.id, tripId: checkTripRef(s.tripId, tripIds, ctx), date: s.date, location: checkLocation(s.location, ctx), currency: s.currency,
-    sb: s.sb, bb: s.bb, minutes: s.minutes, buyin: s.buyin, cashout: s.cashout, timeRake: s.timeRake ?? 0,
+    ...fmt, minutes: s.minutes, buyin: s.buyin, cashout: s.cashout, timeRake: s.timeRake ?? 0,
+    ...(s.rakeback ? { rakeback: s.rakeback } : {}),
     rate: checkRate(s.rate, s.currency, s.date, ctx), condition: checkCondition(s.condition, ctx), tags: checkTags(s.tags, ctx),
     note: checkText(s.note, 500, ctx, 'メモ'),
     createdAt: isTime(s.createdAt) ? s.createdAt : 1, updatedAt: isTime(s.updatedAt) ? s.updatedAt : 1,
@@ -135,6 +160,7 @@ function checkSession(s, tripIds, ctx) {
 const DRAFT_TEXT = [
   'tripId', 'date', 'location', 'currency', 'sb', 'bb', 'hours', 'mins', 'buyin', 'cashout', 'timeRake', 'note', 'condition',
   'name', 'startDate', 'endDate', 'expenses',
+  'format', 'table', 'feePerBuyin', 'buyinCount', 'rakeback',
 ];
 const DRAFT_BOOL = ['durationEdited', 'buyinEdited'];
 
@@ -197,7 +223,8 @@ function segmentsValid(a) {
 function checkActive(a, tripIds, ctx) {
   if (!isObj(a) || !isId(a.id)) ctx.fail('IDが不正です');
   if (!LIVE_STATUSES.includes(a.status)) ctx.fail('状態が不正です');
-  if (!CURRENCY_CODES.includes(a.currency) || !checkStake(a)) ctx.fail('通貨・レートが不正です');
+  if (!CURRENCY_CODES.includes(a.currency)) ctx.fail('通貨が不正です');
+  const fmt = checkFormat(a, ctx, { withCount: false });
   if (!isTime(a.startedAt)) ctx.fail('開始日時が不正です');
   // 時間・状態・金額の意味が変わる修復は、タイマー自体に残して画面で知らせる（利用者が確認するまで消さない）
   let repairs = [];
@@ -225,9 +252,10 @@ function checkActive(a, tripIds, ctx) {
   let unreadable = rawBuyins ? 0 : 1;
   let undated = 0;
   for (const b of rawBuyins || []) {
-    if (!isObj(b) || !isAmount(b.amount) || b.amount <= 0) { unreadable++; continue; }
+    // 定額卓では、1回ごとの料金（fee）も持つ
+    if (!isObj(b) || !isAmount(b.amount) || b.amount <= 0 || (b.fee != null && !isAmount(b.fee))) { unreadable++; continue; }
     if (!isTime(b.at)) undated++;
-    buyins.push({ amount: b.amount, at: isTime(b.at) ? b.at : a.startedAt });
+    buyins.push({ amount: b.amount, at: isTime(b.at) ? b.at : a.startedAt, ...(b.fee != null ? { fee: b.fee } : {}) });
   }
   if (unreadable && rawBuyins) {
     ctx.soft('バイインの記録が不正です', null, '金額が読めないバイインの記録を外しました');
@@ -256,7 +284,7 @@ function checkActive(a, tripIds, ctx) {
   if (location !== (typeof a.location === 'string' ? a.location.trim() : '')) note(`場所の記録が壊れていたため「${location}」にしました。`);
   return {
     id: a.id, tripId: checkTripRef(a.tripId, tripIds, ctx),
-    location, currency: a.currency, sb: a.sb, bb: a.bb, date,
+    location, currency: a.currency, ...fmt, date,
     tz: isTz(a.tz) ? a.tz : '',
     startedAt: a.startedAt, segments: segs.map((g) => ({ s: g.s, e: g.e ?? null })),
     status, buyins,
@@ -281,6 +309,15 @@ function checkPrefs(p) {
   if (isObj(p.buyins)) {
     out.buyins = {};
     for (const c of CURRENCY_CODES) if (isAmount(p.buyins[c])) out.buyins[c] = p.buyins[c];
+  }
+  // 定額卓：前回の方式と、通貨ごとの前回のテーブル額・料金
+  if (p.lastFormat === 'blind' || p.lastFormat === 'fixed') out.lastFormat = p.lastFormat;
+  if (isObj(p.fixed)) {
+    out.fixed = {};
+    for (const c of CURRENCY_CODES) {
+      const f = p.fixed[c];
+      if (isObj(f) && isNum(f.table) && f.table > 0 && f.table <= MAX_NUMBER && isNum(f.fee) && f.fee >= 0 && f.fee < f.table) out.fixed[c] = { table: f.table, fee: f.fee };
+    }
   }
   for (const k of ['lastBackupAt', 'backupSnoozeUntil', 'backupVersion']) if (isNum(p[k]) && p[k] >= 0) out[k] = p[k];
   if (p.lastBackupMethod === 'share' || p.lastBackupMethod === 'download') out.lastBackupMethod = p.lastBackupMethod;

@@ -1,11 +1,13 @@
 // タイマー：開始画面と進行中カード
 import { getDb } from '../store.js';
 import * as A from '../actions.js';
-import { parseNumber, esc, fmtElapsed, fmtAmount, fmtStake, fmtTimeInTz, fmtDuration, fmtInput, CURRENCY_CODES, toInputInTz, fromInputInTz, isNonexistentLocalTime, currentTz } from '../util.js';
+import { parseNumber, esc, fmtElapsed, fmtAmount, fmtStake, fmtSessionStake, fmtNum, fmtTimeInTz, fmtDuration, fmtInput, CURRENCY_CODES, toInputInTz, fromInputInTz, isNonexistentLocalTime, currentTz } from '../util.js';
+import { validateFixed, defaultFee } from '../calc.js';
 import { header, icons, toast, showError, busy, confirmDialog, numberDialog } from '../ui.js';
 import {
   tripField, currencyField, textField, amountField, stakeFields, chipsHtml, readForm, showErrors, clearErrors,
   attachNumberFormatting, unitOf, conditionField, bindConditionClear, handleTripMissing,
+  formatField, modeBox, fixedFields, feeInputValue, bindFormatMode,
 } from './fields.js';
 import { CONDITIONS, normalizeCondition } from '../tags.js';
 
@@ -17,6 +19,8 @@ export function renderLiveStart(el) {
   const cur = db.prefs.lastCurrency || 'USD';
   const st = (db.prefs.stakes || {})[cur];
   const bi = (db.prefs.buyins || {})[cur];
+  const fmt = db.prefs.lastFormat === 'fixed' ? 'fixed' : 'blind';
+  const fx = (db.prefs.fixed || {})[cur] || (db.prefs.fixed || {}).TWD || null;
   el.innerHTML = `
     ${header({ title: 'プレイ開始', back: '#/' })}
     <div class="page">
@@ -26,9 +30,12 @@ export function renderLiveStart(el) {
           ${textField({ name: 'location', label: '場所・店舗名', value: db.prefs.lastLocation || '', placeholder: '例：Club A', list: 'loc-list' })}
           <datalist id="loc-list">${A.recentLocations(db, 20).map((l) => `<option value="${esc(l)}">`).join('')}</datalist>
           <div class="chips">${chipsHtml(A.recentLocations(db, 5).map((l) => ({ label: l, data: { location: l } })))}</div>
+          ${formatField(fmt)}
           ${currencyField(cur)}
-          ${stakeFields(st ? fmtInput(st.sb) : '', st ? fmtInput(st.bb) : '')}
-          ${amountField({ name: 'buyin', label: '最初のバイイン', value: bi != null ? fmtInput(bi) : '', unit: unitOf(cur), hint: 'リバイ・追加購入はプレイ中に追加できます' })}
+          ${modeBox('blind', `
+            ${stakeFields(st ? fmtInput(st.sb) : '', st ? fmtInput(st.bb) : '')}
+            ${amountField({ name: 'buyin', label: '最初のバイイン', value: bi != null ? fmtInput(bi) : '', unit: unitOf(cur), hint: 'リバイ・追加購入はプレイ中に追加できます' })}`)}
+          ${modeBox('fixed', fixedFields({ table: fx ? fmtInput(fx.table) : '6,600', fee: fx ? feeInputValue(fx.table, fx.fee) : '', unit: unitOf(cur), withCount: false }))}
           ${tripField(db, A.defaultTripId(db))}
         </section>
         <section class="card form-card">
@@ -44,6 +51,13 @@ export function renderLiveStart(el) {
   const form = el.querySelector('form');
   attachNumberFormatting(form);
   bindConditionClear(form);
+  // 定額卓に切り替えたら、通貨は台湾ドルを提案する（変更は自由）
+  bindFormatMode(form, (fixed, fromUser) => {
+    if (fixed && fromUser) {
+      const twd = form.querySelector('input[name="currency"][value="TWD"]');
+      if (twd && !twd.checked) { twd.checked = true; twd.dispatchEvent(new Event('change', { bubbles: true })); }
+    }
+  });
   const refresh = () => {
     const c = form.querySelector('[name="currency"]:checked').value;
     form.querySelectorAll('[data-unit]').forEach((u) => { u.textContent = unitOf(c); });
@@ -90,7 +104,7 @@ export function renderLiveStart(el) {
   refresh();
 }
 
-function validateStart(raw) {
+function validateStart(raw, { withCount = false } = {}) {
   const errors = {};
   const value = { tripId: raw.tripId || null };
   const loc = (raw.location || '').trim();
@@ -98,6 +112,15 @@ function validateStart(raw) {
   else value.location = loc.slice(0, 60);
   if (!CURRENCY_CODES.includes(raw.currency)) errors.currency = '通貨を選択してください';
   else value.currency = raw.currency;
+  value.condition = normalizeCondition(raw.condition);
+  if (raw.format === 'fixed') {
+    // 定額卓：テーブル額と料金（開始時は1回分）。ブラインドは記録しない
+    const fx = validateFixed(raw, { requireCount: withCount });
+    Object.assign(errors, fx.errors);
+    Object.assign(value, { format: 'fixed', table: fx.value.table, feePerBuyin: fx.value.feePerBuyin, buyinCount: fx.value.buyinCount, sb: null, bb: null });
+    return { ok: !Object.keys(errors).length, errors, value };
+  }
+  value.format = 'blind';
   const sb = parseNumber(raw.sb);
   const bb = parseNumber(raw.bb);
   if (!sb.ok) errors.sb = 'SB：' + sb.error; else value.sb = sb.value;
@@ -105,7 +128,6 @@ function validateStart(raw) {
   if (value.sb != null && value.bb != null && value.sb > value.bb) errors.sb = 'SBはBB以下にしてください';
   const bi = parseNumber(raw.buyin, { allowEmpty: true });
   if (!bi.ok) errors.buyin = bi.error; else value.buyin = bi.value || 0;
-  value.condition = normalizeCondition(raw.condition);
   return { ok: !Object.keys(errors).length, errors, value };
 }
 
@@ -113,6 +135,11 @@ function validateStart(raw) {
 export function quickStartInfo(db) {
   const p = db.prefs;
   const cur = p.lastCurrency;
+  if (p.lastFormat === 'fixed') {
+    const fx = cur && (p.fixed || {})[cur];
+    if (!p.lastLocation || !fx) return null;
+    return { format: 'fixed', location: p.lastLocation, currency: cur, table: fx.table, feePerBuyin: fx.fee, sb: null, bb: null, buyin: fx.table, tripId: A.defaultTripId(db) || null };
+  }
   const st = cur && (p.stakes || {})[cur];
   if (!p.lastLocation || !st) return null;
   const buyin = (p.buyins || {})[cur] ?? 0;
@@ -159,6 +186,7 @@ export function renderLiveEdit(el) {
   const tz = a.tz || currentTz();
   const toLocalInput = (ms) => toInputInTz(ms, tz);
   const otherTz = a.tz && a.tz !== currentTz();
+  const isFixedLive = a.format === 'fixed';
   el.innerHTML = `
     ${header({ title: 'プレイ中の情報を修正', back: '#/' })}
     <div class="page">
@@ -180,10 +208,14 @@ export function renderLiveEdit(el) {
           ${textField({ name: 'location', label: '場所・店舗名', value: a.location, list: 'loc-list' })}
           <datalist id="loc-list">${A.recentLocations(db, 20).map((l) => `<option value="${esc(l)}">`).join('')}</datalist>
           ${currencyField(a.currency)}
-          ${stakeFields(fmtInput(a.sb), fmtInput(a.bb))}
+          ${isFixedLive ? '<input type="hidden" name="format" value="fixed">' : stakeFields(fmtInput(a.sb), fmtInput(a.bb))}
           ${tripField(db, a.tripId || '')}
           ${conditionField(a.condition)}
         </section>
+        ${isFixedLive ? `
+        <section class="card form-card">
+          ${fixedFields({ table: fmtInput(a.table), fee: feeInputValue(a.table, a.feePerBuyin), count: String(a.buyins.length), unit: unitOf(a.currency), withCount: true })}
+        </section>` : `
         <section class="card form-card">
           <div class="field">
             <span class="field-label">バイインの内訳</span>
@@ -197,7 +229,7 @@ export function renderLiveEdit(el) {
             <span class="field-hint">0または空欄にした行は削除されます。</span>
             <span class="field-error" data-err="buyins"></span>
           </div>
-        </section>
+        </section>`}
         <div class="form-actions">
           <button type="submit" class="btn btn-primary btn-block btn-lg" data-act="save">${icons.check}<span>修正を保存</span></button>
           <a class="btn btn-ghost btn-block" href="#/">キャンセル</a>
@@ -208,10 +240,12 @@ export function renderLiveEdit(el) {
   const form = el.querySelector('form');
   attachNumberFormatting(form);
   bindConditionClear(form);
+  if (isFixedLive) bindFormatMode(form);
   const refresh = () => {
     const c = form.querySelector('[name="currency"]:checked').value;
     form.querySelectorAll('[data-unit]').forEach((u) => { u.textContent = unitOf(c); });
-    form.querySelector('[data-stake-chips]').innerHTML = chipsHtml(A.recentStakes(getDb(), c).map((x) => ({ label: `${x.sb}/${x.bb}`, data: { sb: x.sb, bb: x.bb } })));
+    const chips = form.querySelector('[data-stake-chips]');
+    if (chips) chips.innerHTML = chipsHtml(A.recentStakes(getDb(), c).map((x) => ({ label: `${x.sb}/${x.bb}`, data: { sb: x.sb, bb: x.bb } })));
   };
   form.addEventListener('change', (e) => { if (e.target.name === 'currency') refresh(); });
   form.addEventListener('click', (e) => {
@@ -232,24 +266,26 @@ export function renderLiveEdit(el) {
     e.preventDefault();
     busy(form.querySelector('[data-act="save"]'), async () => {
       const raw = readForm(form);
-      const v = validateStart({ ...raw, buyin: '' });
+      const v = validateStart({ ...raw, buyin: '' }, { withCount: true });
       const errors = { ...v.errors };
       delete errors.buyin;
       const t = fromInputInTz(raw.startedAt, tz);
       if (isNonexistentLocalTime(raw.startedAt, tz)) errors.startedAt = 'その時刻は夏時間の切り替えで存在しません。前後の時刻を入力してください';
       else if (!raw.startedAt || !Number.isFinite(t)) errors.startedAt = '開始時刻を入力してください';
       const buyins = [];
-      a.buyins.forEach((b, i) => {
-        const r = parseNumber(raw[`buyin_${i}`], { allowEmpty: true });
-        if (!r.ok) errors.buyins = `${i + 1}回目：${r.error}`;
-        else if (r.value > 0) buyins.push({ amount: r.value, at: b.at });
-      });
+      if (!isFixedLive) {
+        a.buyins.forEach((b, i) => {
+          const r = parseNumber(raw[`buyin_${i}`], { allowEmpty: true });
+          if (!r.ok) errors.buyins = `${i + 1}回目：${r.error}`;
+          else if (r.value > 0) buyins.push({ amount: r.value, at: b.at });
+        });
+      }
       if (Object.keys(errors).length) { showErrors(form, errors); return; }
       clearErrors(form);
       // 秒は元の値を保つ（分単位の入力で数十秒ずれないように）
       const startedAt = toLocalInput(a.startedAt) === raw.startedAt ? a.startedAt : t;
       try {
-        A.editLive({ ...v.value, buyin: undefined, startedAt, buyins }, a.id, baseRev);
+        A.editLive({ ...v.value, buyin: undefined, startedAt, buyins: isFixedLive ? undefined : buyins }, a.id, baseRev);
         toast('プレイ中の情報を修正しました', { type: 'success' });
         location.hash = '#/';
       } catch (err) {
@@ -271,6 +307,8 @@ export function liveCardHtml(db) {
   if (!a) return '';
   const trip = a.tripId ? db.trips.find((t) => t.id === a.tripId) : null;
   const total = A.liveBuyinTotal(a);
+  const fixed = a.format === 'fixed';
+  const feeTotal = A.liveFeeTotal(a);
   const statusLabel = a.status === 'playing' ? 'プレイ中' : a.status === 'break' ? '休憩中' : '精算入力中';
   return `
     <section class="live-card status-${esc(a.status)}" aria-label="進行中のセッション">
@@ -292,9 +330,19 @@ export function liveCardHtml(db) {
         </div>` : ''}
       <div class="live-info">
         <div class="live-info-item"><span class="k">場所</span><span class="v">${esc(a.location)}</span></div>
-        <div class="live-info-item"><span class="k">レート</span><span class="v">${esc(fmtStake(a.currency, a.sb, a.bb))}</span></div>
+        <div class="live-info-item"><span class="k">${fixed ? 'テーブル' : 'レート'}</span><span class="v">${esc(fmtSessionStake(a))}</span></div>
         <div class="live-info-item"><span class="k">遠征</span><span class="v">${trip ? esc(trip.name) : '遠征なし'}</span></div>
       </div>
+      ${fixed ? `
+      <div class="live-buyin">
+        <div>
+          <span class="k">払った額（${a.buyins.length}回）</span>
+          <span class="v num">${esc(fmtAmount(total + feeTotal, a.currency))}</span>
+          <span class="live-buyin-detail">チップ ${esc(fmtNum(total))} ＋ 料金 ${esc(fmtNum(feeTotal))}</span>
+        </div>
+        ${a.status !== 'settling' ? `<button type="button" class="btn btn-small btn-ghost" data-live="add-fixed">${icons.plus}<span>${esc(fmtNum(a.table))} 追加</span></button>` : ''}
+      </div>
+      ${a.status !== 'settling' && a.buyins.length ? `<button type="button" class="link live-undo" data-live="undo-buyin">直前のバイイン（${esc(fmtAmount(a.table, a.currency))}）を取り消す</button>` : ''}` : `
       <div class="live-buyin">
         <div>
           <span class="k">合計バイイン</span>
@@ -303,7 +351,7 @@ export function liveCardHtml(db) {
         </div>
         ${a.status !== 'settling' ? `<button type="button" class="btn btn-small btn-ghost" data-live="add-buyin">${icons.plus}<span>追加バイイン</span></button>` : ''}
       </div>
-      ${a.status !== 'settling' && a.buyins.length ? `<button type="button" class="link live-undo" data-live="undo-buyin">直前のバイイン（${esc(fmtAmount(a.buyins[a.buyins.length - 1].amount, a.currency))}）を取り消す</button>` : ''}
+      ${a.status !== 'settling' && a.buyins.length ? `<button type="button" class="link live-undo" data-live="undo-buyin">直前のバイイン（${esc(fmtAmount(a.buyins[a.buyins.length - 1].amount, a.currency))}）を取り消す</button>` : ''}`}
       ${a.status !== 'settling' ? `
         <div class="live-cond">
           <span class="k">今日の冴え${a.condition ? '' : '<small>（座る前に）</small>'}</span>
@@ -349,6 +397,12 @@ export function bindLiveCard(root) {
       else if (act === 'resume') await busy(btn, async () => { A.resumeLive(); });
       else if (act === 'finish') {
         await busy(btn, async () => { A.settleLive(); location.hash = '#/live/finish'; });
+      } else if (act === 'add-fixed') {
+        // 定額卓：確認なしでワンタップ（間違えたら「取り消す」）
+        await busy(btn, async () => {
+          A.addFixedBuyin(a.id);
+          toast(`${fmtAmount(a.table, a.currency)} を追加しました（${a.buyins.length + 1}回目）`, { type: 'success' });
+        });
       } else if (act === 'add-buyin') {
         const last = a.buyins.length ? a.buyins[a.buyins.length - 1].amount : '';
         const res = await numberDialog({
@@ -365,7 +419,8 @@ export function bindLiveCard(root) {
         toast(`${fmtAmount(res.value, a.currency)} を追加しました`, { type: 'success' });
       } else if (act === 'undo-buyin') {
         const lastB = a.buyins[a.buyins.length - 1];
-        const ok = await confirmDialog({ title: 'バイインを取り消しますか？', message: `直前に記録した ${esc(fmtAmount(lastB.amount, a.currency))} を合計バイインから除きます。`, confirmText: '取り消す', danger: true });
+        const lastText = a.format === 'fixed' ? `${fmtAmount(a.table, a.currency)}（チップ＋料金）` : fmtAmount(lastB.amount, a.currency);
+        const ok = await confirmDialog({ title: 'バイインを取り消しますか？', message: `直前に記録した ${esc(lastText)} を除きます。`, confirmText: '取り消す', danger: true });
         if (!ok) return;
         A.removeLastBuyin(a.id);
       }

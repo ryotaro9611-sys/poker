@@ -4,9 +4,37 @@ import { normalizeCondition, normalizeTags } from './tags.js';
 
 const round2 = (x) => Math.round(x * 100) / 100;
 
-/** ポーカー収支 = キャッシュアウト − バイイン − 別払いタイムレーキ（現地通貨） */
+/* ---------- 定額卓（台湾式）：テーブル額を払うと、その 1/11 が料金、残りがチップ ---------- */
+export const FIXED_TABLES = [3300, 6600, 11000, 22000, 33000];
+export const isFixed = (s) => !!s && s.format === 'fixed';
+/** テーブル額から1回あたりの料金の初期値（チップ額の10%）を出す。例：6,600 → 600 */
+export function defaultFee(table) {
+  return Math.round(table / 11);
+}
+/** 定額卓の金額：チップ代の合計（buyin）と料金の合計（timeRake） */
+export function fixedAmounts(table, fee, count) {
+  return { buyin: round2((table - fee) * count), timeRake: round2(fee * count) };
+}
+
+/**
+ * ポーカー収支 = キャッシュアウト − バイイン − 別払いの料金（タイムレーキ） ＋ レーキバック（現地通貨）
+ * 定額卓では、バイイン＝チップ代、別払いの料金＝テーブル額に含まれる料金。
+ */
 export function sessionProfit(s) {
-  return round2(s.cashout - s.buyin - (s.timeRake || 0));
+  return round2(s.cashout - s.buyin - (s.timeRake || 0) + (s.rakeback || 0));
+}
+/** 料金を引く前の収支（卓上の収支）＝ キャッシュアウト − バイイン */
+export function sessionTableProfit(s) {
+  return round2(s.cashout - s.buyin);
+}
+/** 実際に払った額の合計（チップ代＋料金）。ROI の分母 */
+export function sessionPaid(s) {
+  return round2(s.buyin + (s.timeRake || 0));
+}
+/** 料金を払った回数：定額卓はバイイン回数、それ以外は別払いの料金があれば1回 */
+export function sessionFeeCount(s) {
+  if (isFixed(s)) return s.buyinCount || 0;
+  return (s.timeRake || 0) > 0 ? 1 : 0;
 }
 
 /** 採用した「1現地通貨 = 何円」。JPYは常に1、未取得は null（換算待ち） */
@@ -20,8 +48,9 @@ export function sessionProfitJPY(s) {
   return r == null ? null : round2(sessionProfit(s) * r);
 }
 
+/** 獲得bb。ブラインドを記録していない記録（定額卓など）は null */
 export function sessionBB(s) {
-  return sessionProfit(s) / s.bb;
+  return s.bb > 0 ? sessionProfit(s) / s.bb : null;
 }
 
 export function isPending(s) {
@@ -38,41 +67,60 @@ export function perHour(total, minutes) {
  * 円は換算済みのみを合算し、換算待ちは件数として別に返す（0円扱いしない）。
  */
 export function summarize(sessions) {
+  const money = () => ({ profit: 0, tableProfit: 0, fee: 0, rakeback: 0, paid: 0 });
   const out = {
-    count: 0, minutes: 0, bb: 0, wins: 0, losses: 0,
-    jpy: { count: 0, minutes: 0, profit: 0, pending: 0, pendingMinutes: 0 },
+    count: 0, minutes: 0, bb: 0, bbMinutes: 0, bbCount: 0, wins: 0, losses: 0, feeCount: 0,
+    jpy: { count: 0, minutes: 0, pending: 0, pendingMinutes: 0, ...money() },
     byCurrency: {},
+  };
+  // 円換算は記録ごとに丸めてから足す（sessionProfitJPY と同じ。合計の端数がずれないように）
+  const addMoney = (o, s, rate) => {
+    const conv = (x) => round2(x * rate);
+    o.profit = round2(o.profit + conv(sessionProfit(s)));
+    o.tableProfit = round2(o.tableProfit + conv(sessionTableProfit(s)));
+    o.fee = round2(o.fee + conv(s.timeRake || 0));
+    o.rakeback = round2(o.rakeback + conv(s.rakeback || 0));
+    o.paid = round2(o.paid + conv(sessionPaid(s)));
   };
   for (const s of sessions) {
     const p = sessionProfit(s);
+    const bbv = sessionBB(s);
     out.count++;
     out.minutes += s.minutes;
-    out.bb += sessionBB(s);
+    out.feeCount += sessionFeeCount(s);
+    if (bbv != null) { out.bb += bbv; out.bbMinutes += s.minutes; out.bbCount++; }
     if (p > 0) out.wins++;
     else if (p < 0) out.losses++;
-    const pj = sessionProfitJPY(s);
-    if (pj == null) {
+    const rate = sessionRate(s);
+    if (rate == null) {
       out.jpy.pending++;
       out.jpy.pendingMinutes += s.minutes;
     } else {
       out.jpy.count++;
       out.jpy.minutes += s.minutes;
-      out.jpy.profit += pj;
+      addMoney(out.jpy, s, rate);
     }
-    const c = (out.byCurrency[s.currency] ||= { currency: s.currency, count: 0, minutes: 0, profit: 0, bb: 0 });
+    const c = (out.byCurrency[s.currency] ||= { currency: s.currency, count: 0, minutes: 0, bb: 0, bbMinutes: 0, feeCount: 0, ...money() });
     c.count++;
     c.minutes += s.minutes;
-    c.profit = round2(c.profit + p);
-    c.bb += sessionBB(s);
+    c.feeCount += sessionFeeCount(s);
+    addMoney(c, s, 1);
+    if (bbv != null) { c.bb += bbv; c.bbMinutes += s.minutes; }
   }
-  out.jpy.profit = round2(out.jpy.profit);
+  // 時給・bb/時間・ROI は「合計 ÷ 合計」（bb はブラインドを記録した分の時間で割る）
+  const finish = (o) => {
+    o.hourly = perHour(o.profit, o.minutes);
+    o.netFee = round2(o.fee - o.rakeback);
+    o.feePerHour = perHour(o.netFee, o.minutes);
+    o.roi = o.paid > 0 ? o.profit / o.paid : null;
+  };
   out.bb = Math.round(out.bb * 1e6) / 1e6;
-  out.bbPerHour = perHour(out.bb, out.minutes);
-  out.jpy.hourly = perHour(out.jpy.profit, out.jpy.minutes);
+  out.bbPerHour = perHour(out.bb, out.bbMinutes);
+  finish(out.jpy);
   for (const c of Object.values(out.byCurrency)) {
     c.bb = Math.round(c.bb * 1e6) / 1e6;
-    c.hourly = perHour(c.profit, c.minutes);
-    c.bbPerHour = perHour(c.bb, c.minutes);
+    c.bbPerHour = perHour(c.bb, c.bbMinutes);
+    finish(c);
   }
   return out;
 }
@@ -187,7 +235,7 @@ export function tripMetrics(trip, sessions, today) {
 }
 
 export function stakeKey(s) {
-  return `${s.currency}|${Number(s.sb)}|${Number(s.bb)}`;
+  return isFixed(s) ? `${s.currency}|fixed|${Number(s.table)}` : `${s.currency}|${Number(s.sb)}|${Number(s.bb)}`;
 }
 export function locationKey(s) {
   return (s.location || '').trim().toLowerCase();
@@ -226,13 +274,17 @@ export function validateSession(raw) {
   if (!CURRENCY_CODES.includes(raw.currency)) errors.currency = '通貨を選択してください';
   else v.currency = raw.currency;
 
-  const sb = parseNumber(raw.sb, { min: 0 });
-  const bb = parseNumber(raw.bb, { min: 0 });
+  const fixed = raw.format === 'fixed';
+  v.format = fixed ? 'fixed' : 'blind';
+  // ブラインド：ブラインド制では必須、定額卓では任意（入れなければ bb の集計に含めない）
+  const sb = parseNumber(raw.sb, { min: 0, allowEmpty: fixed });
+  const bb = parseNumber(raw.bb, { min: 0, allowEmpty: fixed });
   if (!sb.ok) errors.sb = 'SB：' + sb.error;
   else v.sb = sb.value;
   if (!bb.ok) errors.bb = 'BB：' + bb.error;
-  else if (bb.value <= 0) errors.bb = 'BBは0より大きい値にしてください';
+  else if (bb.value != null && bb.value <= 0) errors.bb = 'BBは0より大きい値にしてください';
   else v.bb = bb.value;
+  if (fixed && (v.sb == null) !== (v.bb == null) && !errors.sb && !errors.bb) errors.bb = 'SBとBBは両方入れるか、両方空欄にしてください';
   if (v.sb != null && v.bb != null && v.sb > v.bb) errors.sb = 'SBはBB以下にしてください';
 
   const h = parseNumber(raw.hours, { min: 0, allowEmpty: true, integer: true, max: 72 });
@@ -246,15 +298,26 @@ export function validateSession(raw) {
     else v.minutes = total;
   }
 
-  const bi = parseNumber(raw.buyin, { min: 0 });
   const co = parseNumber(raw.cashout, { min: 0 });
-  const tr = parseNumber(raw.timeRake, { min: 0, allowEmpty: true });
-  if (!bi.ok) errors.buyin = bi.error;
-  else v.buyin = bi.value;
   if (!co.ok) errors.cashout = co.error;
   else v.cashout = co.value;
-  if (!tr.ok) errors.timeRake = tr.error;
-  else v.timeRake = tr.value ?? 0;
+  if (fixed) {
+    // 定額卓：テーブル額・1回あたりの料金・回数から、チップ代と料金の合計を出す
+    const fx = validateFixed(raw);
+    Object.assign(errors, fx.errors);
+    Object.assign(v, fx.value);
+  } else {
+    const bi = parseNumber(raw.buyin, { min: 0 });
+    const tr = parseNumber(raw.timeRake, { min: 0, allowEmpty: true });
+    if (!bi.ok) errors.buyin = bi.error;
+    else v.buyin = bi.value;
+    if (!tr.ok) errors.timeRake = tr.error;
+    else v.timeRake = tr.value ?? 0;
+    Object.assign(v, { table: null, feePerBuyin: null, buyinCount: null });
+  }
+  const rb = parseNumber(raw.rakeback, { min: 0, allowEmpty: true });
+  if (!rb.ok) errors.rakeback = rb.error;
+  else v.rakeback = rb.value ?? 0;
 
   v.tripId = raw.tripId || null;
   v.note = String(raw.note ?? '').trim().slice(0, 500);
@@ -262,6 +325,31 @@ export function validateSession(raw) {
   v.tags = normalizeTags(raw.tags);
 
   return { ok: Object.keys(errors).length === 0, errors, value: v };
+}
+
+/** 定額卓の入力（テーブル額・料金・回数）の検証。回数を省くと1回として検証する（開始画面用） */
+export function validateFixed(raw, { requireCount = true } = {}) {
+  const errors = {};
+  const value = {};
+  const tb = parseNumber(raw.table, { min: 0 });
+  if (!tb.ok) errors.table = 'テーブル：' + tb.error;
+  else if (tb.value <= 0) errors.table = 'テーブルの額は0より大きい値にしてください';
+  else value.table = tb.value;
+  const fe = parseNumber(raw.feePerBuyin, { min: 0, allowEmpty: true });
+  if (!fe.ok) errors.feePerBuyin = '料金：' + fe.error;
+  else if (value.table != null) {
+    const fee = fe.value ?? defaultFee(value.table);
+    if (fee >= value.table) errors.feePerBuyin = '料金はテーブルの額より小さくしてください';
+    else value.feePerBuyin = fee;
+  }
+  const cn = parseNumber(requireCount ? raw.buyinCount : (raw.buyinCount || '1'), { min: 0, integer: true, max: 999 });
+  if (!cn.ok) errors.buyinCount = 'バイイン回数：' + (cn.error === '値が大きすぎます' ? '999回以内で入力してください' : cn.error);
+  else if (cn.value < 1) errors.buyinCount = 'バイイン回数は1回以上にしてください';
+  else value.buyinCount = cn.value;
+  if (value.table != null && value.feePerBuyin != null && value.buyinCount != null) {
+    Object.assign(value, fixedAmounts(value.table, value.feePerBuyin, value.buyinCount));
+  }
+  return { ok: !Object.keys(errors).length, errors, value };
 }
 
 export function validateTrip(raw) {

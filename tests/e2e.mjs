@@ -51,7 +51,7 @@ let seq = 0;
 const waiting = new Map();
 const jsErrors = [];
 let rateMode = 'ok';
-const MOCK_RATES = { USD: 150, PHP: 2.5, KRW: 0.11 };
+const MOCK_RATES = { USD: 150, PHP: 2.5, KRW: 0.11, TWD: 4.8 };
 const rateRequests = [];
 
 function send(method, params = {}) {
@@ -1194,6 +1194,100 @@ test('R1：保存失敗から「もう一度試す」で開いた精算画面で
   await ev(`(() => { const d = JSON.parse(localStorage.getItem('tripledger:data:v1')); const a = d.active; a.status = 'playing'; a.endedAt = null; a.segments.push({ s: Date.now(), e: null }); a.rev = (a.rev || 0) + 1; localStorage.setItem('tripledger:data:v1', JSON.stringify(d)); })()`);
   await sleep(600);
   assert((await data()).active.draft?.cashout === '321', `離れる直前の入力を確定（${JSON.stringify((await data()).active.draft)}）`);
+});
+
+/* ---------- 台湾（定額卓・TWD・レーキバック） ---------- */
+
+test('台湾：定額卓のタイマー（開始→ワンタップ追加→取り消し→精算→円換算）', async () => {
+  await fresh();
+  rateMode = 'ok';
+  await go('#/live/start');
+  await click('input[name=format][value=fixed]');
+  assert(await ev(`document.querySelector('input[name=currency][value=TWD]').checked`), '定額卓に切り替えると台湾ドルになる');
+  assert(await ev(`document.querySelector('[data-mode=blind]').disabled && !document.querySelector('[data-mode=fixed]').disabled`), 'ブラインドの欄は無効');
+  await click('[data-table="6600"]');
+  includes(await text('[data-fixed-summary]'), 'チップ 6,000 ＋ 料金 600');
+  await setVal('[name=location]', 'Taipei Club');
+  await click('[data-act=start]');
+  await waitFor(`location.hash === '#/' && document.querySelector('.live-card')`);
+  let card = await text('.live-card');
+  includes(card, 'TWD 6,600卓'); includes(card, '6,600 TWD'); includes(card, '1回');
+  await click('[data-live=add-fixed]');
+  await waitFor(`document.querySelector('.live-card')?.innerText.includes('13,200 TWD')`, 3000, '2回目');
+  await click('[data-live=add-fixed]');
+  await waitFor(`document.querySelector('.live-card')?.innerText.includes('19,800 TWD')`, 3000, '3回目');
+  await click('[data-live=undo-buyin]');
+  await waitFor(`document.querySelector('.modal .btn-danger')`);
+  await click('.modal .btn-danger');
+  await waitFor(`document.querySelector('.live-card')?.innerText.includes('13,200 TWD')`, 3000, '取り消し');
+  card = await text('.live-card');
+  includes(card, 'チップ 12,000 ＋ 料金 1,200');
+  await click('[data-live=finish]');
+  await waitFor(`document.querySelector('[name=cashout]')`);
+  assert((await ev(`document.querySelector('[name=buyinCount]').value`)) === '2', '回数は自動');
+  await setVal('[name=cashout]', '15000');
+  const pv = await text('[data-preview]');
+  includes(pv, '卓上の収支'); includes(pv, '+3,000 TWD'); includes(pv, '料金（2回）'); includes(pv, '−1,200 TWD'); includes(pv, '+1,800 TWD'); includes(pv, 'ROI +13.6%');
+  await click('[data-act=save]');
+  await waitFor(`/^#\\/sessions\\/[^/n]/.test(location.hash)`, 3000, '保存');
+  await waitFor(`document.querySelector('#view').innerText.includes('1 TWD = 4.8円')`, 5000, '台湾ドルの円換算');
+  const s0 = (await data()).sessions[0];
+  assert(s0.format === 'fixed' && s0.table === 6600 && s0.feePerBuyin === 600 && s0.buyinCount === 2, '定額卓として保存');
+  assert(s0.buyin === 12000 && s0.timeRake === 1200 && s0.sb === null && s0.bb === null, `金額 ${s0.buyin}/${s0.timeRake}`);
+  const t = await text();
+  includes(t, 'TWD 6,600卓'); includes(t, '+8,640円'); includes(t, '料金（600 × 2回）'); includes(t, '+13.6%');
+  assert(!t.includes('bb/時間'), '定額卓の詳細に bb は出さない');
+  await go('#/');
+  includes(await text('.quick-start'), 'TWD 6,600卓', '前回と同じ設定で開始');
+});
+
+test('台湾：手入力の定額卓とレーキバック、成績の「料金とROI」とテーブル別の比較', async () => {
+  await fresh();
+  rateMode = 'ok';
+  await manualSession({ date: '2026-10-01', currency: 'USD', location: 'Vegas', sb: '2', bb: '5', hours: '2', buyin: '500', cashout: '600', timeRake: '20' });
+  await go('#/sessions/new');
+  await waitFor(`document.querySelector('[name=location]')`);
+  await click('input[name=format][value=fixed]');
+  await setVal('[name=date]', '2026-10-30');
+  await setVal('[name=location]', 'Taipei Club');
+  await click('[data-table="11000"]');
+  await click('[data-count-step="1"]');
+  await setVal('[name=hours]', '4');
+  await setVal('[name=cashout]', '25000');
+  await ev(`document.querySelectorAll('details.disclosure').forEach((d) => { if (d.querySelector('[name=rakeback]')) d.open = true; })`);
+  await setVal('[name=rakeback]', '500');
+  includes(await text('[data-preview]'), '+3,500 TWD');
+  await click('[data-act=save]');
+  await waitFor(`/^#\\/sessions\\/[^/n]/.test(location.hash)`, 3000, '保存');
+  const tw = (await data()).sessions.find((x) => x.format === 'fixed');
+  assert(tw.buyin === 20000 && tw.timeRake === 2000 && tw.rakeback === 500 && tw.buyinCount === 2, JSON.stringify(tw));
+  await go('#/stats');
+  await setVal('[data-f=view]', 'TWD');
+  let t = await text();
+  includes(t, '料金と ROI'); includes(t, '料金（2回）'); includes(t, '+15.9%'); includes(t, 'レーキバック');
+  await setVal('[data-f=view]', 'YEN');
+  t = await text();
+  includes(t, 'bb はブラインドを記録した1件');
+  await click('[data-compare=stake]');
+  t = await text();
+  includes(t, 'TWD 11,000卓'); includes(t, 'USD 2/5');
+});
+
+test('台湾：プレイ中の修正で回数と料金を直す（チップと料金を作り直す）', async () => {
+  await fresh();
+  const now = Date.now();
+  await seed({ active: { id: 'tw', tripId: null, location: 'Taipei Club', currency: 'TWD', sb: null, bb: null, format: 'fixed', table: 6600, feePerBuyin: 600, date: '2026-10-30', tz: 'Asia/Taipei', startedAt: now - 3600e3, segments: [{ s: now - 3600e3, e: null }], status: 'playing', buyins: [{ amount: 6000, fee: 600, at: now - 3600e3 }], draft: null, rev: 0 } });
+  await click('.live-edit');
+  await waitFor(`document.querySelector('[name=buyinCount]')`);
+  await click('[data-count-step="1"]');
+  await click('[data-count-step="1"]');
+  await setVal('[name=feePerBuyin]', '500');
+  includes(await text('[data-fixed-summary]'), 'チップ 18,300 ＋ 料金 1,500');
+  await click('[data-act=save]');
+  await waitFor(`location.hash === '#/'`);
+  const a = (await data()).active;
+  assert(a.buyins.length === 3 && a.feePerBuyin === 500 && a.buyins.every((b) => b.amount === 6100 && b.fee === 500), JSON.stringify(a.buyins));
+  includes(await text('.live-card'), '19,800 TWD');
 });
 
 test('画面幅：375px・430px で横にはみ出さない', async () => {

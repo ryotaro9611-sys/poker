@@ -1,7 +1,7 @@
 // データ操作（遠征・セッション・タイマー）。すべて store.commit 経由で原子的に保存する。
 import { commit, getDb, UserError, ConflictError } from './store.js';
 import { uid, todayYMD, ymdFromDate, ymdInTz, currentTz, fmtInput } from './util.js';
-import { MAX_MINUTES } from './calc.js';
+import { MAX_MINUTES, fixedAmounts } from './calc.js';
 
 /* ---------------- 共通 ---------------- */
 
@@ -9,8 +9,13 @@ function rememberPrefs(db, v) {
   const p = db.prefs;
   if (v.tripId !== undefined) p.lastTripId = v.tripId || null;
   if (v.location) p.lastLocation = v.location;
+  if (v.format === 'fixed' || v.format === 'blind') p.lastFormat = v.format;
   if (v.currency) {
     p.lastCurrency = v.currency;
+    if (v.format === 'fixed' && v.table > 0 && v.feePerBuyin != null) {
+      p.fixed = p.fixed || {};
+      p.fixed[v.currency] = { table: v.table, fee: v.feePerBuyin };
+    }
     if (v.bb) {
       p.stakes = p.stakes || {};
       p.stakes[v.currency] = { sb: v.sb, bb: v.bb };
@@ -192,8 +197,17 @@ export function liveBreakMs(a, now = Date.now()) {
   if (a.status === 'settling' && last.e && a.endedAt && a.endedAt > last.e) total += a.endedAt - last.e;
   return total;
 }
+/** 合計バイイン（定額卓ではチップ代の合計） */
 export function liveBuyinTotal(a) {
   return Math.round(a.buyins.reduce((s, b) => s + b.amount, 0) * 100) / 100;
+}
+/** 定額卓：料金の合計 */
+export function liveFeeTotal(a) {
+  return Math.round(a.buyins.reduce((s, b) => s + (b.fee || 0), 0) * 100) / 100;
+}
+/** 定額卓：1回分のバイイン（チップ＋料金） */
+function fixedBuyin(table, fee, at) {
+  return { amount: fixedAmounts(table, fee, 1).buyin, fee, at };
 }
 
 export function startLive(v) {
@@ -201,24 +215,24 @@ export function startLive(v) {
     if (db.active) throw new UserError('すでに進行中のセッションがあります');
     assertTrip(db, v.tripId);
     const now = Date.now();
+    const fixed = v.format === 'fixed';
     db.active = {
       id: uid(),
       tripId: v.tripId || null,
       location: v.location,
       currency: v.currency,
-      sb: v.sb,
-      bb: v.bb,
+      ...(fixed ? { format: 'fixed', table: v.table, feePerBuyin: v.feePerBuyin, sb: null, bb: null } : { sb: v.sb, bb: v.bb }),
       date: ymdFromDate(new Date(now)), // 開始した現地の日付
       tz: currentTz(),
       startedAt: now,
       segments: [{ s: now, e: null }],
       status: 'playing',
-      buyins: v.buyin > 0 ? [{ amount: v.buyin, at: now }] : [],
+      buyins: fixed ? [fixedBuyin(v.table, v.feePerBuyin, now)] : v.buyin > 0 ? [{ amount: v.buyin, at: now }] : [],
       condition: v.condition ?? null,
       draft: null,
       rev: 0,
     };
-    rememberPrefs(db, { ...v, initialBuyin: v.buyin });
+    rememberPrefs(db, fixed ? v : { ...v, format: 'blind', initialBuyin: v.buyin });
     return db.active;
   });
 }
@@ -269,6 +283,14 @@ export function addBuyin(amount, expectedId) {
     return a;
   }, expectedId);
 }
+/** 定額卓：同じテーブル額をもう一度（チップ＋料金） */
+export function addFixedBuyin(expectedId) {
+  return withActive((a) => {
+    if (a.format !== 'fixed') throw new UserError('定額卓のセッションではありません');
+    a.buyins.push(fixedBuyin(a.table, a.feePerBuyin, Date.now()));
+    return a;
+  }, expectedId);
+}
 export function removeLastBuyin(expectedId) {
   return withActive((a) => {
     a.buyins.pop();
@@ -283,7 +305,7 @@ export function editLive(v, expectedId, expectedRev) {
   return withActive((a, db) => {
     if (a.status === 'settling') throw new UserError('精算入力中です。精算画面で修正してください');
     if (v.tripId !== undefined) assertTrip(db, v.tripId);
-    const before = { location: a.location, currency: a.currency, sb: a.sb, bb: a.bb, tripId: a.tripId, condition: a.condition, date: a.date };
+    const before = { location: a.location, currency: a.currency, sb: a.sb, bb: a.bb, tripId: a.tripId, condition: a.condition, date: a.date, table: a.table, feePerBuyin: a.feePerBuyin, count: a.buyins.length };
     const now = Date.now();
     if (v.startedAt != null && v.startedAt !== a.startedAt) {
       const first = a.segments[0];
@@ -297,7 +319,13 @@ export function editLive(v, expectedId, expectedRev) {
       a.date = a.tz ? ymdInTz(v.startedAt, a.tz) : ymdFromDate(new Date(v.startedAt));
     }
     for (const k of ['location', 'currency', 'sb', 'bb', 'tripId', 'condition']) if (v[k] !== undefined) a[k] = v[k];
-    if (Array.isArray(v.buyins)) a.buyins = v.buyins;
+    if (a.format === 'fixed' && v.table != null) {
+      // 定額卓：テーブル額・料金・回数から、バイインの内訳を作り直す（日時は残す）
+      const n = v.buyinCount ?? a.buyins.length;
+      a.table = v.table;
+      a.feePerBuyin = v.feePerBuyin;
+      a.buyins = Array.from({ length: n }, (_, i) => fixedBuyin(a.table, a.feePerBuyin, a.buyins[i] ? a.buyins[i].at : now));
+    } else if (Array.isArray(v.buyins)) a.buyins = v.buyins;
     syncDraft(a, v, before);
     return a;
   }, expectedId, expectedRev);
@@ -317,6 +345,9 @@ function syncDraft(a, v, before) {
   if (changed('bb')) d.bb = fmtInput(a.bb);
   if (changed('tripId')) d.tripId = a.tripId || '';
   if (changed('condition')) d.condition = a.condition == null ? '' : String(a.condition);
+  if (changed('table')) d.table = fmtInput(a.table);
+  if (changed('feePerBuyin')) d.feePerBuyin = fmtInput(a.feePerBuyin);
+  if (a.buyins.length !== before.count && a.format === 'fixed') d.buyinCount = String(a.buyins.length);
   // プレイ日は、下書きで手動で変えていなければ開始時刻の日付に合わせる
   if (changed('date') && d.date === before.date) d.date = a.date;
 }

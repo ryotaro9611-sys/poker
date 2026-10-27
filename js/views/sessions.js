@@ -2,9 +2,9 @@
 import { getDb, isDemo } from '../store.js';
 import * as A from '../actions.js';
 import { resolvePending, rateState, isFutureDate } from '../rates.js';
-import { sessionProfit, sessionProfitJPY, sessionBB, sessionRate, sortSessions, perHour, summarize } from '../calc.js';
+import { sessionProfit, sessionProfitJPY, sessionBB, sessionRate, sortSessions, perHour, summarize, sessionTableProfit, sessionPaid, isFixed } from '../calc.js';
 import {
-  esc, fmtDate, fmtDateShort, fmtMoney, fmtYen, fmtAmount, fmtBB, fmtBBph, fmtHourly, fmtDuration, fmtStake,
+  esc, fmtDate, fmtDateShort, fmtMoney, fmtYen, fmtAmount, fmtBB, fmtBBph, fmtHourly, fmtDuration, fmtStake, fmtSessionStake, fmtPercent, fmtNum,
   fmtRate, fmtTimeInTz, signClass,
 } from '../util.js';
 import { header, icons, toast, showError, busy, confirmDialog, numberDialog, emptyState } from '../ui.js';
@@ -24,7 +24,7 @@ export function sessionRow(s, db, { showTrip = true } = {}) {
   return `
     <a class="row" href="#/sessions/${esc(s.id)}">
       <div class="row-main">
-        <div class="row-title"><span class="row-name">${esc(s.location)}</span><span class="tag">${esc(fmtStake(s.currency, s.sb, s.bb))}</span></div>
+        <div class="row-title"><span class="row-name">${esc(s.location)}</span><span class="tag">${esc(fmtSessionStake(s))}</span></div>
         <div class="row-sub">${esc(fmtDateShort(s.date))}<span class="dot-sep">·</span>${esc(fmtDuration(s.minutes))}${trip ? `<span class="dot-sep">·</span>${esc(trip.name)}` : ''}</div>
       </div>
       <div class="row-side">
@@ -172,6 +172,10 @@ export function renderSessionDetail(el, { id }) {
   const p = sessionProfit(s);
   const pj = sessionProfitJPY(s);
   const bb = sessionBB(s);
+  const fixed = isFixed(s);
+  const paid = sessionPaid(s);
+  const tableP = sessionTableProfit(s);
+  const netFee = (s.timeRake || 0) - (s.rakeback || 0);
   const trip = s.tripId ? db.trips.find((t) => t.id === s.tripId) : null;
   const u = unitOf(s.currency);
 
@@ -179,14 +183,17 @@ export function renderSessionDetail(el, { id }) {
     ${header({ title: '記録の詳細', back: '#/sessions', right: `<a class="btn btn-small btn-ghost" href="#/sessions/${esc(s.id)}/edit">${icons.edit}<span>編集</span></a>` })}
     <div class="page">
       <section class="card hero-card">
-        <div class="hero-meta">${esc(fmtDate(s.date))}<span class="dot-sep">·</span>${esc(fmtStake(s.currency, s.sb, s.bb))}</div>
+        <div class="hero-meta">${esc(fmtDate(s.date))}<span class="dot-sep">·</span>${esc(fmtSessionStake(s))}</div>
         <h2 class="hero-title">${esc(s.location)}</h2>
         <div class="hero-amount ${signClass(p)}">${esc(fmtMoney(p, s.currency))}</div>
         <div class="hero-sub">${s.currency === 'JPY' ? 'ポーカー収支' : pj == null ? '<span class="badge badge-warn">換算待ち</span> 円換算は未確定' : `円換算 <b class="${signClass(pj)}">${esc(fmtYen(pj))}</b>`}</div>
         <div class="stat-grid stat-grid-3">
           <div class="stat"><span class="stat-k">実プレイ時間</span><span class="stat-v">${esc(fmtDuration(s.minutes))}</span></div>
+          ${bb != null ? `
           <div class="stat"><span class="stat-k">獲得bb</span><span class="stat-v ${signClass(bb)}">${esc(fmtBB(bb))}</span></div>
-          <div class="stat"><span class="stat-k">bb/時間</span><span class="stat-v ${signClass(bb)}">${esc(fmtBBph(perHour(bb, s.minutes)))}</span></div>
+          <div class="stat"><span class="stat-k">bb/時間</span><span class="stat-v ${signClass(bb)}">${esc(fmtBBph(perHour(bb, s.minutes)))}</span></div>` : `
+          <div class="stat"><span class="stat-k">ROI</span><span class="stat-v ${signClass(p)}">${esc(fmtPercent(paid > 0 ? p / paid : null))}</span></div>
+          <div class="stat"><span class="stat-k">料金/時間</span><span class="stat-v">${netFee ? esc(fmtAmount(Math.round(netFee / (s.minutes / 60)), s.currency)) : '0 ' + esc(u)}</span></div>`}
           <div class="stat stat-wide"><span class="stat-k">時給（${esc(s.currency)}）</span><span class="stat-v ${signClass(p)}">${esc(fmtHourly(perHour(p, s.minutes), s.currency))}</span></div>
           ${s.currency !== 'JPY' ? `<div class="stat"><span class="stat-k">時給（円）</span><span class="stat-v ${signClass(pj)}">${pj == null ? '換算待ち' : esc(fmtHourly(perHour(pj, s.minutes), 'JPY'))}</span></div>` : ''}
         </div>
@@ -194,10 +201,18 @@ export function renderSessionDetail(el, { id }) {
 
       <section class="card">
         <h3 class="card-title">金額の内訳</h3>
+        ${fixed ? `
+        <div class="kv"><span class="k">テーブル</span><span class="v num">${esc(fmtNum(s.table))} × ${s.buyinCount}回 ＝ ${esc(fmtAmount(paid, s.currency))}</span></div>
+        <div class="kv"><span class="k">合計キャッシュアウト</span><span class="v num">${esc(fmtAmount(s.cashout, s.currency))}</span></div>
+        <div class="kv"><span class="k">チップ代（${s.buyinCount}回）</span><span class="v num">−${esc(fmtAmount(s.buyin, s.currency))}</span></div>
+        <div class="kv kv-sub"><span class="k">卓上の収支（料金を引く前）</span><span class="v num ${signClass(tableP)}">${esc(fmtMoney(tableP, s.currency))}</span></div>
+        <div class="kv"><span class="k">料金（${esc(fmtNum(s.feePerBuyin))} × ${s.buyinCount}回）</span><span class="v num">${s.timeRake ? '−' + esc(fmtAmount(s.timeRake, s.currency)) : '0 ' + esc(u)}</span></div>` : `
         <div class="kv"><span class="k">合計キャッシュアウト</span><span class="v num">${esc(fmtAmount(s.cashout, s.currency))}</span></div>
         <div class="kv"><span class="k">合計バイイン</span><span class="v num">−${esc(fmtAmount(s.buyin, s.currency))}</span></div>
-        <div class="kv"><span class="k">タイムレーキ（別払い）</span><span class="v num">${s.timeRake ? '−' + esc(fmtAmount(s.timeRake, s.currency)) : '0 ' + esc(u)}</span></div>
+        <div class="kv"><span class="k">タイムレーキ（別払い）</span><span class="v num">${s.timeRake ? '−' + esc(fmtAmount(s.timeRake, s.currency)) : '0 ' + esc(u)}</span></div>`}
+        ${s.rakeback ? `<div class="kv"><span class="k">レーキバック</span><span class="v num pos">+${esc(fmtAmount(s.rakeback, s.currency))}</span></div>` : ''}
         <div class="kv kv-total"><span class="k">ポーカー収支</span><span class="v num ${signClass(p)}">${esc(fmtMoney(p, s.currency))}</span></div>
+        ${paid > 0 ? `<div class="kv"><span class="k">ROI（収支 ÷ 払った額）</span><span class="v num ${signClass(p)}">${esc(fmtPercent(p / paid))}</span></div>` : ''}
       </section>
 
       <section class="card">
