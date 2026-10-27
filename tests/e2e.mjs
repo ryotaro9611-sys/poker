@@ -1652,6 +1652,151 @@ test('T12：テーブル額×回数が保存の上限を超える入力は、保
   assert((await ev(`location.hash`)) === '#/sessions/new', '入力画面のまま');
 });
 
+/* ---------- 8回目のレビュー（v1.3.2）の指摘 ---------- */
+
+// v1.3.0 が保存した形の精算下書き（回数を直した印・基準がない）
+const legacyFixedDraft = (over = {}) => ({ tripId: '', date: '2026-10-30', location: 'Taipei Club', currency: 'TWD', format: 'fixed', table: '6,600', feePerBuyin: '', buyinCount: '3', hours: '1', mins: '0', cashout: '30,000', rakeback: '', note: '', condition: '', tags: [], durationEdited: false, buyinEdited: true, ...over });
+const twSettling = (over = {}) => {
+  const a = twActive({ status: 'settling', endedAt: Date.now(), ...over });
+  a.segments = [{ s: a.startedAt, e: a.endedAt }];
+  return a;
+};
+const v1Seed = async (active) => {
+  await ev(`localStorage.clear(); localStorage.setItem('tripledger:data:v1', ${q(JSON.stringify({ version: 1, trips: [], sessions: [], active, drafts: {}, prefs: {}, rateCache: {} }))}); 1`);
+  await reload();
+};
+const liveCount = async () => (await data()).active.buyins.length;
+async function addFixed(expected) {
+  await click('[data-live=add-fixed]');
+  await waitFor(`JSON.parse(localStorage.getItem('tripledger:data:v2')).active.buyins.length === ${expected}`, 3000, '追加');
+}
+async function undoBuyin(expected) {
+  await click('[data-live=undo-buyin]');
+  await waitFor(`!!document.querySelector('.modal .btn-danger')`);
+  await click('.modal .btn-danger');
+  await waitFor(`JSON.parse(localStorage.getItem('tripledger:data:v2')).active.buyins.length === ${expected}`, 3000, '取り消し');
+}
+async function saveSettled() {
+  await click('[data-act=save]');
+  await waitFor(`/^#\\/sessions\\/[^/n]/.test(location.hash)`, 3000, '保存');
+  const s0 = (await data()).sessions[0];
+  return { n: s0.buyinCount, paid: s0.buyin + (s0.timeRake || 0), buyin: s0.buyin, profit: s0.cashout - s0.buyin - (s0.timeRake || 0) };
+}
+
+test('T13：v1.3.0 の精算下書きを開き、何も入力せずにプレイに戻って追加しても、精算に反映される（実際の v1.3.0）', async () => {
+  await fresh();
+  await unregisterSw();
+  await send('Page.navigate', { url: BASE + 'v130/#/' });
+  await waitFor(`document.documentElement.classList.contains('ready') && location.pathname === '/v130/'`, 10000, 'v1.3.0 の起動');
+  await ev(`localStorage.clear(); 1`);
+  await send('Page.navigate', { url: BASE + 'v130/#/live/start' });
+  await waitFor(`document.documentElement.classList.contains('ready') && !!document.querySelector('[name=format][value=fixed]')`, 10000, 'v1.3.0 の開始画面');
+  await click('[name=format][value=fixed]');
+  await setVal('[name=location]', 'Taipei Club');
+  await click('[data-act=start]');
+  await waitFor(`location.hash === '#/' && !!document.querySelector('[data-live=finish]')`, 5000, 'v1.3.0 で開始');
+  await settleOpen();
+  await setVal('[name=buyinCount]', '3');
+  await setVal('[name=cashout]', '30000');
+  await waitFor(`JSON.parse(localStorage.getItem('tripledger:data:v1')).active.draft?.buyinCount === '3'`, 3000, 'v1.3.0 の下書き');
+  await send('Page.navigate', { url: BASE + '#/live/finish' });
+  await waitFor(`document.documentElement.classList.contains('ready') && !!document.querySelector('[name=cashout]')`, 10000, '新しい版の精算画面');
+  assert((await countValue()) === '3', '3回を引き継ぐ');
+  await backToPlay(); // 何も入力しない
+  await addFixed(2);
+  await reload();
+  await settleOpen();
+  assert((await countValue()) === '4', `直した3回＋追加1回＝4回のはずが ${await countValue()}`);
+  const r = await saveSettled();
+  assert(r.n === 4 && r.paid === 26400 && r.profit === 3600, JSON.stringify(r));
+});
+
+test('T13：旧版の下書きを入力せずに再開しても、取り消し・追加が反映される（定額卓・ブラインド制・再読み込み・復元）', async () => {
+  // 定額卓：タイマー3回・精算で2回に補正 → 入力せず再開 → 1回取り消す → 1回
+  await fresh();
+  await v1Seed(twSettling({ buyins: [0, 1, 2].map((i) => ({ amount: 6000, fee: 600, at: Date.now() - 3600e3 + i })), draft: legacyFixedDraft({ buyinCount: '2' }) }));
+  await go('#/live/finish');
+  await waitFor(`!!document.querySelector('[name=cashout]')`);
+  assert((await countValue()) === '2', '補正した2回');
+  await backToPlay();
+  await undoBuyin(2);
+  await settleOpen();
+  assert((await countValue()) === '1', `取り消し：1回のはずが ${await countValue()}`);
+
+  // ブラインド制：タイマー100・精算で300に補正 → 入力せず再開 → 100追加 → 400、収支 +100
+  await fresh();
+  const now = Date.now();
+  await v1Seed({ id: 'bl', tripId: null, location: 'Manila', currency: 'USD', sb: 1, bb: 2, date: '2026-10-30', tz: 'Asia/Tokyo', startedAt: now - 3600e3, segments: [{ s: now - 3600e3, e: now }], endedAt: now, status: 'settling', buyins: [{ amount: 100, at: now - 3600e3 }], rev: 0,
+    draft: { tripId: '', date: '2026-10-30', location: 'Manila', currency: 'USD', sb: '1', bb: '2', hours: '1', mins: '0', buyin: '300', cashout: '500', timeRake: '', note: '', condition: '', tags: [], durationEdited: false, buyinEdited: true } });
+  await go('#/live/finish');
+  await waitFor(`!!document.querySelector('[name=cashout]')`);
+  await backToPlay();
+  await click('[data-live=add-buyin]');
+  await waitFor(`document.querySelector('.modal input')`);
+  await setVal('.modal input', '100');
+  await modalPrimary();
+  await waitFor(`JSON.parse(localStorage.getItem('tripledger:data:v2')).active.buyins.length === 2`, 3000, '追加');
+  await reload();
+  await settleOpen();
+  assert((await ev(`document.querySelector('[name=buyin]').value`)) === '400', `ブラインド制：400 のはずが ${await ev(`document.querySelector('[name=buyin]').value`)}`);
+  const rb = await saveSettled();
+  assert(rb.buyin === 400 && rb.profit === 100, JSON.stringify(rb));
+
+  // 旧版のバックアップから復元 → 入力せず再開 → 追加 → 4回
+  await fresh();
+  await importFile({ app: 'TripLedger', data: { version: 1, trips: [], sessions: [], drafts: {}, prefs: {}, rateCache: {}, active: twSettling({ draft: legacyFixedDraft() }) } });
+  await waitFor(`!!JSON.parse(localStorage.getItem('tripledger:data:v2') || 'null')?.active`, 3000, '復元');
+  await go('#/live/finish');
+  await waitFor(`!!document.querySelector('[name=cashout]')`);
+  await backToPlay();
+  await addFixed(2);
+  await settleOpen();
+  assert((await countValue()) === '4', `復元後：4回のはずが ${await countValue()}`);
+});
+
+test('T13：v1.3.0 で精算から戻ったまま更新し、精算画面を開かずに追加しても反映される', async () => {
+  await fresh();
+  const a = twActive({ draft: legacyFixedDraft() }); // プレイ中のまま、回数3回の下書きが残っている
+  await v1Seed(a);
+  await addFixed(2);
+  await settleOpen();
+  assert((await countValue()) === '4', `4回のはずが ${await countValue()}`);
+  includes(await text('[data-legacy-draft]'), '4回', '引き継いだことを知らせる');
+});
+
+test('T13：開き直しても増減を二重に足さない。再開の保存に失敗したら再開せず入力を残す', async () => {
+  await fresh();
+  await v1Seed(twSettling({ draft: legacyFixedDraft() }));
+  for (let i = 0; i < 3; i++) {
+    await go('#/live/finish');
+    await waitFor(`!!document.querySelector('[name=cashout]')`);
+    assert((await countValue()) === '3', `${i + 1}回目に開いたとき：3回のはずが ${await countValue()}`);
+    await backToPlay();
+    await settleOpen();
+    await backToPlay();
+    await reload();
+    await settleOpen();
+  }
+  assert((await countValue()) === '3', '開き直しても3回');
+  // 再開の保存に失敗：精算画面に残り、入力と下書きはそのまま
+  await setVal('[name=note]', 'メモ');
+  await sleep(450);
+  await ev(`window.__setItem = Storage.prototype.setItem; Storage.prototype.setItem = function (k, v) { if (k === 'tripledger:data:v2') throw new DOMException('quota', 'QuotaExceededError'); return window.__setItem.call(this, k, v); }; 1`);
+  try {
+    await click('[data-act=back-to-play]');
+    await sleep(300);
+    assert((await ev(`location.hash`)) === '#/live/finish', '精算画面に残る');
+    assert((await data()).active.status === 'settling', '再開していない');
+    assert((await countValue()) === '3' && (await ev(`document.querySelector('[name=note]').value`)) === 'メモ', '入力が残る');
+  } finally {
+    await ev(`Storage.prototype.setItem = window.__setItem; 1`);
+  }
+  await backToPlay();
+  await addFixed(2);
+  await settleOpen();
+  assert((await countValue()) === '4', `保存が戻った後：4回のはずが ${await countValue()}`);
+});
+
 test('画面幅：375px・430px で横にはみ出さない', async () => {
   await fresh();
   await ev(`sessionStorage.setItem('tripledger:demo', '1')`);

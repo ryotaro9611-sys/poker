@@ -3,7 +3,7 @@
 // ・端末内データの読み込み（寛容）：収支そのもの（日付・通貨・金額・時間・レート）が壊れた記録だけ除外し、
 //   メモ・冴え・タグ・遠征の参照・為替などの付随項目は、その項目だけ初期化して記録を残す
 // 入力画面の検証（calc.js / util.js）と同じ上限を使い、アプリ自身が保存した値を拒否しないようにする。
-import { CURRENCY_CODES, isValidYMD, ymdFromDate, ymdInTz, MAX_NUMBER } from './util.js';
+import { CURRENCY_CODES, isValidYMD, ymdFromDate, ymdInTz, MAX_NUMBER, parseNumber, fmtInput } from './util.js';
 import { MAX_MINUTES, fixedAmounts } from './calc.js';
 import { normalizeCondition, TAG_IDS } from './tags.js';
 
@@ -168,7 +168,7 @@ const DRAFT_TEXT = [
   'name', 'startDate', 'endDate', 'expenses',
   'format', 'table', 'feePerBuyin', 'buyinCount', 'rakeback', 'buyinBase', 'countBase', 'fixedSb', 'fixedBb',
 ];
-const DRAFT_BOOL = ['durationEdited', 'buyinEdited', 'countEdited'];
+const DRAFT_BOOL = ['durationEdited', 'buyinEdited', 'countEdited', 'carriedOver'];
 
 function checkDraft(d, ctx) {
   if (d == null) return null;
@@ -190,6 +190,33 @@ function checkDraft(d, ctx) {
       ctx.soft(`下書きに不明な項目「${String(k).slice(0, 20)}」があります`, null, '下書きの不明な項目を外しました');
     }
   }
+  return out;
+}
+
+/**
+ * v1.3.0 までの精算下書きには、手で直した回数・合計バイインの「基準」（直した時点のプレイ中の記録）がない。
+ * 読み込むたびに今のプレイ中の記録を基準として補う。次の保存（再開・追加・取り消しなど）で一緒に書き込まれるので、
+ * それより後の増減は精算で差分として足される。直した値がプレイ中の記録と違えば carriedOver を付け、精算画面で知らせる。
+ */
+function upgradeDraft(d, fixed, buyins) {
+  // v1.3.1 以降の下書き、または何も手で直していない下書き（どちらも補うものがない）はそのまま
+  if (!d || d.countEdited !== undefined || !d.buyinEdited) return d;
+  const num = (v, opt) => { const r = parseNumber(String(v ?? ''), opt); return r.ok ? r.value : null; };
+  const count = buyins.length;
+  const total = Math.round(buyins.reduce((sum, b) => sum + b.amount, 0) * 100) / 100;
+  const out = { ...d };
+  let differs = false;
+  if (out.buyinBase == null) {
+    out.buyinBase = fmtInput(total);
+    const edited = num(out.buyin);
+    if (!fixed && edited != null && edited !== total) differs = true;
+  }
+  // 旧版では料金などを直しても buyinEdited になったので、回数は「プレイ中の記録と違うときだけ」直したものとみなす
+  const n = num(out.buyinCount, { integer: true, max: 999 });
+  out.countEdited = fixed && n != null && n >= 1 && n !== count;
+  out.countBase = String(count);
+  if (out.countEdited) differs = true;
+  if (differs) out.carriedOver = true;
   return out;
 }
 
@@ -303,7 +330,7 @@ function checkActive(a, tripIds, ctx) {
     tz: isTz(a.tz) ? a.tz : '',
     startedAt: a.startedAt, segments: segs.map((g) => ({ s: g.s, e: g.e ?? null })),
     status, buyins,
-    condition: checkCondition(a.condition, ctx), draft: checkDraft(a.draft, ctx),
+    condition: checkCondition(a.condition, ctx), draft: upgradeDraft(checkDraft(a.draft, ctx), fmt.format === 'fixed', buyins),
     rev: Number.isInteger(a.rev) && a.rev >= 0 ? a.rev : 0,
     ...(endedAt != null ? { endedAt } : {}),
     // 修復履歴は10件まで（復元の検査と同じ上限）。新しいお知らせを残し、古いものから外す

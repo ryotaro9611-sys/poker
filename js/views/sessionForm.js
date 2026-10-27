@@ -43,23 +43,22 @@ function initialValues(db, mode, { session, active, presetTrip }) {
         const edited = parseNumber(d.buyin).value;
         const base = parseNumber(d.buyinBase).value;
         if (edited != null && base != null) v.buyin = fmtInput(Math.max(0, edited + (liveTotal - base)));
-      } else if (!fixedLive && parseNumber(d.buyin).value != null && parseNumber(d.buyin).value !== liveTotal) {
-        // 更新前の版の下書き（基準がない）：直した値は捨てずに残し、プレイ中の記録と違うことを知らせる
-        notes.push(`合計バイイン：更新前の版で入力した ${d.buyin} を残しています（プレイ中の記録は ${auto.buyin}）。`);
       }
-      let countEdited = !!d.countEdited;
-      if (!('countEdited' in d) && fixedLive) {
-        // v1.3.0 の下書きには回数を直したかの印がない（料金などを直しても buyinEdited になっていた）。
-        // 入力された回数がプレイ中の記録と違うときは、その値を残して確かめてもらう（黙って捨てない）
-        const n = parseNumber(d.buyinCount, { integer: true, max: 999 }).value;
-        countEdited = !!d.buyinEdited && n != null && n >= 1 && n !== a.buyins.length;
-        if (countEdited) notes.push(`バイイン回数：更新前の版で入力した ${n}回 を残しています（プレイ中の記録は ${a.buyins.length}回）。`);
-      }
+      const countEdited = !!d.countEdited;
       if (!countEdited) v.buyinCount = auto.buyinCount;
       else if (d.countBase != null) {
         const edited = parseNumber(d.buyinCount, { integer: true }).value;
         const base = parseNumber(d.countBase, { integer: true }).value;
         if (edited != null && base != null) v.buyinCount = String(Math.max(1, edited + (a.buyins.length - base)));
+      }
+      // 更新前の版の精算画面で直した値を引き継いだ（読み込み時に基準を補った下書き）：プレイ中の記録と違えば知らせる
+      if (d.carriedOver) {
+        if (fixedLive && countEdited && v.buyinCount !== auto.buyinCount) {
+          notes.push(`バイイン回数：更新前の版の精算画面で直した回数を引き継いでいます（この画面では ${v.buyinCount}回、プレイ中の記録は ${a.buyins.length}回）。`);
+        }
+        if (!fixedLive && buyinEdited && parseNumber(v.buyin).value !== liveTotal) {
+          notes.push(`合計バイイン：更新前の版の精算画面で直した額を引き継いでいます（この画面では ${v.buyin}、プレイ中の記録は ${auto.buyin}）。`);
+        }
       }
       return { values: v, restored: true, edited: { buyin: buyinEdited, count: countEdited }, notes };
     }

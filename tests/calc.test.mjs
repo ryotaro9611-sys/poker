@@ -439,5 +439,29 @@ t('T12：1つずつは上限内でも、回数を掛けた合計が保存の上�
   assert.equal(validateSession({ ...fixedRaw, table: '500,000,000,001', feePerBuyin: '0', buyinCount: '2', cashout: '0' }).ok, false);
 });
 
+t('T13：v1.3.0 の精算下書きは、読み込み時に今のプレイ中の記録を基準として補う（何度読み込んでも同じ）', () => {
+  const now = Date.now();
+  const buyins = [{ amount: 6000, fee: 600, at: now - 3600e3 }];
+  const active = { id: 'a', tripId: null, location: 'T', currency: 'TWD', sb: null, bb: null, format: 'fixed', table: 6600, feePerBuyin: 600, date: '2026-10-30', tz: 'Asia/Taipei', startedAt: now - 3600e3, segments: [{ s: now - 3600e3, e: now }], endedAt: now, status: 'settling', buyins, rev: 0,
+    draft: { format: 'fixed', table: '6,600', buyinCount: '3', cashout: '30,000', buyinEdited: true, durationEdited: false } };
+  for (const strict of [false, true]) {
+    const r = validateData({ trips: [], sessions: [], active }, { strict });
+    assert.deepEqual(r.problems, [], '修復扱いにしない');
+    const d = r.data.active.draft;
+    assert.equal(d.countEdited, true);
+    assert.equal(d.countBase, '1');
+    assert.equal(d.buyinBase, '6,000');
+    assert.equal(d.carriedOver, true);
+    assert.deepEqual(validateData(r.data, { strict }).data.active.draft, d, '補った後は変わらない');
+  }
+  const feeOnly = validateData({ trips: [], sessions: [], active: { ...active, draft: { ...active.draft, buyinCount: '1', feePerBuyin: '500' } } }, { strict: true }).data.active.draft;
+  assert.equal(feeOnly.countEdited, false, '料金だけ直した：回数はプレイ中の記録に合わせる');
+  assert.equal(feeOnly.carriedOver, undefined);
+  const untouched = { cashout: '30,000', note: 'x' };
+  assert.deepEqual(validateData({ trips: [], sessions: [], active: { ...active, draft: untouched } }, { strict: true }).data.active.draft, untouched, '何も直していない下書きはそのまま');
+  const current = { ...active.draft, countEdited: true, countBase: '2', buyinBase: '12,000' };
+  assert.deepEqual(validateData({ trips: [], sessions: [], active: { ...active, draft: current } }, { strict: true }).data.active.draft, current, 'v1.3.1 以降の下書きはそのまま');
+});
+
 console.log(`\n${n} tests passed${failed ? `, ${failed} failed` : ''}`);
 if (failed) process.exit(1);
