@@ -158,24 +158,26 @@ export function sessionValue(s, mode) {
 }
 
 /**
- * 日付順の累積推移（期間の開始を0とする）。
+ * セッション順の累積推移（期間の開始を0とする）。
  * mode: 'JPY'（円換算。換算待ちは除外）/ 'BB' / 通貨コード（その通貨のみ）
  */
 export function cumulativeSeries(sessions, mode) {
-  const byDate = new Map();
+  const series = [];
+  let date = null, day = 0, beforeDay = 0;
   for (const s of sortSessions(sessions)) {
     const v = sessionValue(s, mode);
     if (v == null) continue;
-    const e = byDate.get(s.date) || { date: s.date, day: 0, count: 0 };
-    e.day = mode === 'BB' ? e.day + v : round2(e.day + v);
-    e.count++;
-    byDate.set(s.date, e);
+    if (s.date !== date) {
+      beforeDay = series.at(-1)?.cum ?? 0;
+      date = s.date;
+      day = 0;
+    }
+    // 日末の累計は従来と一致させる（特にBBの丸め誤差をセッションごとに積み重ねない）。
+    day = mode === 'BB' ? day + v : round2(day + v);
+    const cum = mode === 'BB' ? Math.round((beforeDay + day) * 1e6) / 1e6 : round2(beforeDay + day);
+    series.push({ date: s.date, value: mode === 'BB' ? Math.round(v * 1e6) / 1e6 : v, cum });
   }
-  let cum = 0;
-  return [...byDate.values()].map((e) => {
-    cum = mode === 'BB' ? Math.round((cum + e.day) * 1e6) / 1e6 : round2(cum + e.day);
-    return { ...e, day: mode === 'BB' ? Math.round(e.day * 1e6) / 1e6 : e.day, cum };
-  });
+  return series;
 }
 
 /** 最大の勝ち・最大の負け（勝ち/負けのセッションがなければ null） */

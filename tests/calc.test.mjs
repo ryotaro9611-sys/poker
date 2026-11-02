@@ -97,6 +97,51 @@ t('累積推移は期間開始を0とする', () => {
   assert.equal(usd.at(-1).cum, 240 - 100 + 280 + 0);
 });
 
+t('累積推移：同日も1セッション1点、日またぎも開始日・開始時刻順', () => {
+  const first = { ...S[0], id: 'first', startedAt: Date.parse('2026-04-01T10:00:00+09:00'), createdAt: 30 };
+  const overnight = { ...S[1], id: 'overnight', date: first.date, startedAt: Date.parse('2026-04-01T23:00:00+09:00'), endedAt: Date.parse('2026-04-02T02:00:00+09:00'), createdAt: 10 };
+  const next = { ...S[2], id: 'next', date: '2026-04-02', startedAt: Date.parse('2026-04-02T10:00:00+09:00') };
+  const sessions = [next, overnight, first];
+  const before = structuredClone(sessions);
+  const ser = cumulativeSeries(sessions, 'JPY');
+  assert.deepEqual(ser.map((p) => p.date), ['2026-04-01', '2026-04-01', '2026-04-02']);
+  assert.deepEqual(ser.map((p) => p.value), [36000, -15000, 41720]);
+  assert.deepEqual(ser.map((p) => p.cum), [36000, 21000, 62720]);
+  assert.deepEqual(sessions, before, '入力の順序・既存データを変えない');
+});
+
+t('累積推移：開始時刻のない既存記録は作成順、同時刻は元の順序、収支0も1点', () => {
+  const sessions = [
+    { ...S[1], date: S[0].date, createdAt: 20 },
+    { ...S[0], createdAt: 10 },
+    { ...S[3], date: S[0].date, createdAt: 20 },
+  ];
+  assert.deepEqual(cumulativeSeries(sessions, 'USD').map((p) => p.cum), [240, 140, 140]);
+  const legacy = sessions.map(({ createdAt, ...s }) => s);
+  assert.deepEqual(cumulativeSeries(legacy, 'USD').map((p) => p.cum), [-100, 140, 140]);
+  assert.deepEqual(cumulativeSeries([], 'JPY'), []);
+});
+
+t('累積推移：円換算待ち・他通貨・BBなしの除外と最終累計を維持する', () => {
+  const sessions = [
+    { ...S[0], createdAt: 1 },
+    { ...S[1], date: S[0].date, rate: null, createdAt: 2 },
+    { ...S[4], date: S[0].date, bb: null, createdAt: 3 },
+  ];
+  assert.deepEqual(cumulativeSeries(sessions, 'JPY').map((p) => p.cum), [36000, 41000]);
+  assert.deepEqual(cumulativeSeries(sessions, 'USD').map((p) => p.cum), [240, 140]);
+  assert.deepEqual(cumulativeSeries(sessions, 'BB').map((p) => p.cum), [48, 28]);
+  assert.deepEqual(cumulativeSeries([sessions[1]], 'JPY'), []);
+});
+
+t('累積推移：同日の小数BBをセッションごとに丸め直して最終累計を変えない', () => {
+  const sessions = Array.from({ length: 6 }, (_, i) => ({
+    ...S[0], id: `third-${i}`, date: i < 3 ? '2026-04-01' : '2026-04-02',
+    buyin: 0, cashout: 1, timeRake: 0, bb: 3, createdAt: i + 1,
+  }));
+  assert.deepEqual(cumulativeSeries(sessions, 'BB').map((p) => p.cum), [0.333333, 0.666667, 1, 1.333333, 1.666667, 2]);
+});
+
 t('同じブラインドでも通貨が違えば別レート', () => {
   const a = { currency: 'USD', sb: 100, bb: 200 };
   const b = { currency: 'PHP', sb: 100, bb: 200 };

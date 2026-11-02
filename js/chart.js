@@ -24,15 +24,15 @@ function compact(v, unit) {
 }
 
 /**
- * series: [{date, day, count, cum}]（期間内の日付順、cum は期間開始からの累計）
+ * series: [{date, value, cum}]（期間内のセッション順、cum は期間開始からの累計）
  * opts: { unit: '円' | 'USD' ..., format: (v)=>string }
  */
 export function mountChart(container, series, { unit, format, cumLabel = '期間内累計' }) {
-  const pts = [{ date: null, day: 0, cum: 0, count: 0 }, ...series];
+  const pts = [{ date: null, value: 0, cum: 0 }, ...series];
   let sel = pts.length - 1;
   container.innerHTML = `
     <div class="chart-readout" aria-live="polite"></div>
-    <div class="chart-box"><svg class="chart-svg" role="img" tabindex="0" aria-label="期間内累計収支の推移グラフ。左右キーで日付を移動できます"></svg></div>`;
+    <div class="chart-box"><svg class="chart-svg" role="img" tabindex="0" aria-label="期間内累計収支の推移グラフ。左右キーでセッションを移動できます"></svg></div>`;
   const readout = container.querySelector('.chart-readout');
   const box = container.querySelector('.chart-box');
   const svg = container.querySelector('svg');
@@ -44,9 +44,10 @@ export function mountChart(container, series, { unit, format, cumLabel = '期間
       readout.innerHTML = `<span class="ro-date">期間の開始</span><span class="ro-cum zero">${esc(cumLabel)} ${esc(format(0))}</span>`;
       return;
     }
+    const sameDate = pts[sel - 1]?.date === pt.date || pts[sel + 1]?.date === pt.date;
     readout.innerHTML = `
-      <span class="ro-date">${esc(fmtDate(pt.date))}${pt.count > 1 ? ` <small>${pt.count}件</small>` : ''}</span>
-      <span class="ro-day ${signClass(pt.day)}">当日 ${esc(format(pt.day))}</span>
+      <span class="ro-date">${esc(fmtDate(pt.date))}${sameDate ? ` <small>セッション${sel}</small>` : ''}</span>
+      <span class="ro-day ${signClass(pt.value)}">今回 ${esc(format(pt.value))}</span>
       <span class="ro-cum ${signClass(pt.cum)}">${esc(cumLabel)} ${esc(format(pt.cum))}</span>`;
   }
 
@@ -77,7 +78,7 @@ export function mountChart(container, series, { unit, format, cumLabel = '期間
       <line class="${t === 0 ? 'axis-zero' : 'grid'}" x1="${padL}" x2="${W - padR}" y1="${y(t).toFixed(1)}" y2="${y(t).toFixed(1)}"/>
       <text class="tick" x="${padL - 8}" y="${(y(t) + 4).toFixed(1)}" text-anchor="end">${esc(labels[i])}</text>`).join('');
     const showDots = pts.length <= 45;
-    const dots = showDots ? pts.slice(1).map((d, i) => `<circle class="dot ${signClass(d.day)}" cx="${x(i + 1).toFixed(1)}" cy="${y(d.cum).toFixed(1)}" r="3"/>`).join('') : '';
+    const dots = showDots ? pts.slice(1).map((d, i) => `<circle class="dot ${signClass(d.value)}" cx="${x(i + 1).toFixed(1)}" cy="${y(d.cum).toFixed(1)}" r="3"/>`).join('') : '';
     const first = pts[1];
     const last = pts[pts.length - 1];
     const xl = [];

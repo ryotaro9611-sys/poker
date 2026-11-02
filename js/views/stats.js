@@ -137,7 +137,7 @@ export function renderStats(el, { query } = {}) {
             <button type="button" role="tab" class="seg-btn ${bbChart ? 'on' : ''}" aria-selected="${bbChart}" data-chart-unit="bb">bb</button>
           </div>
         </div>
-        <p class="muted small chart-caption">${esc(cumLabel())}・開始を0として日ごとに累積${bbChart ? '。bbはレートの違いをならした単位で、' + (isYen ? '全通貨の記録（換算待ちも含む）' : `${esc(state.view)}建ての記録`) + 'をまとめています' : ''}</p>
+        <p class="muted small chart-caption">${esc(cumLabel())}・開始を0としてセッションごとに累積${bbChart ? '。bbはレートの違いをならした単位で、' + (isYen ? '全通貨の記録（換算待ちも含む）' : `${esc(state.view)}建ての記録`) + 'をまとめています' : ''}</p>
         <div class="chart" data-chart></div>
         ${isYen && !bbChart && sum.jpy.pending ? `<p class="muted small">換算待ち${sum.jpy.pending}件はグラフに含まれていません。</p>` : ''}
       </section>

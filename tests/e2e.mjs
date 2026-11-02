@@ -539,6 +539,51 @@ test('成績の追加指標：最大の勝ち・負け・ドローダウン、bb
   await ev(`sessionStorage.clear()`);
 });
 
+test('収支グラフ：同日・日またぎ・既存記録を1セッション1点で表示し、保存内容を変えない', async () => {
+  await fresh();
+  const date = '2026-09-01';
+  await seed({ sessions: [
+    { ...baseSession, id: 'next', date: '2026-09-02', cashout: 150, createdAt: Date.parse('2026-09-02T10:00:00+09:00') },
+    { ...baseSession, id: 'overnight', date, cashout: 50, startedAt: Date.parse('2026-09-01T23:00:00+09:00'), endedAt: Date.parse('2026-09-02T02:00:00+09:00'), tz: 'Asia/Tokyo', createdAt: Date.parse('2026-09-02T02:00:00+09:00') },
+    { ...baseSession, id: 'manual', date, createdAt: Date.parse('2026-09-01T10:00:00+09:00') },
+  ] });
+  const before = await ev(`localStorage.getItem('tripledger:data:v2')`);
+  await go('#/stats');
+  await click('[data-scope=all]');
+  await setVal('[data-f=view]', 'YEN');
+  await click('[data-chart-unit=money]');
+  const xs = await ev(`[...document.querySelectorAll('[data-chart] .dot')].map((p) => +p.getAttribute('cx'))`);
+  assert(xs.length === 3 && xs[0] < xs[1] && xs[1] < xs[2], `3セッションが独立した点になる: ${xs}`);
+  includes(await text('.chart-caption'), 'セッションごとに累積');
+  includes(await text('.ro-cum'), '+200円');
+  const key = (k) => ev(`document.querySelector('.chart-svg').dispatchEvent(new KeyboardEvent('keydown', { key: ${q(k)}, bubbles: true }))`);
+  await key('ArrowLeft');
+  includes(await text('.ro-date'), '2026/09/01');
+  includes(await text('.ro-date'), 'セッション2');
+  includes(await text('.ro-day'), '今回 −50円');
+  includes(await text('.ro-cum'), '+150円');
+  await key('ArrowLeft');
+  includes(await text('.ro-date'), 'セッション1');
+  includes(await text('.ro-cum'), '+200円');
+  await key('ArrowLeft');
+  includes(await text('.chart-readout'), '期間の開始');
+  await key('ArrowRight');
+  includes(await text('.ro-date'), 'セッション1');
+  await click('[data-chart-unit=bb]');
+  assert(await ev(`document.querySelectorAll('[data-chart] .dot').length`) === 3, 'bbも1セッション1点');
+  includes(await text('.ro-cum'), '+100.0 bb');
+  await click('[data-chart-unit=money]');
+  await click('[data-scope=period]');
+  await setVal('[data-f=from]', date);
+  await setVal('[data-f=to]', date);
+  assert(await ev(`document.querySelectorAll('[data-chart] .dot').length`) === 2, '同日の2件を期間指定でも分ける');
+  includes(await text('.ro-cum'), '+150円');
+  await reload();
+  await go('#/stats');
+  assert(await ev(`document.querySelectorAll('[data-chart] .dot').length`) === 3, '既存データをそのまま再読み込みできる');
+  assert(await ev(`localStorage.getItem('tripledger:data:v2')`) === before, 'グラフの閲覧・切り替えで保存内容を変えない');
+});
+
 test('遠征の比較：損益・時給・経費をまかなう時給', async () => {
   await fresh();
   await ev(`sessionStorage.setItem('tripledger:demo', '1')`);
